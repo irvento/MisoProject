@@ -4,7 +4,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Miso Messenger</title>
+    <title>OpenSMS Gateway & Messenger</title>
     <link rel="stylesheet" href="/static/styles.css">
     <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
     <script src="/static/script.js" defer></script>
@@ -13,74 +13,308 @@
 <body>
 
     <div id="app">
-        <!-- Sidebar -->
-        <div class="sidebar">
-            <div class="sidebar-header">
-                <h2>Chats</h2>
-                <div class="sidebar-actions">
-                    <button onclick="openGroupModal()" title="Department Broadcast">📢</button>
-                    <button onclick="openAddContact()" title="New Contact">➕</button>
+        <!-- Top Navigation Bar -->
+        <header class="top-nav">
+            <div class="brand">
+                <div class="brand-icon">📡</div>
+                <div class="brand-text">
+                    <h1>OpenSMS <span>Gateway</span></h1>
+                    <span class="sub-label">Multi-Slot GSM Modem & Middleman Server</span>
                 </div>
             </div>
-            <div class="search-box">
-                <input type="text" id="search-input" placeholder="Search contacts...">
-            </div>
-            <div class="contact-list" id="contact-list">
-                <!-- Contacts injected here -->
-            </div>
-        </div>
 
-        <!-- Main Chat Area -->
-        <div class="chat-area">
-            <!-- Placeholder View -->
-            <!-- Placeholder View (Now Quick Send) -->
-            <div class="chat-placeholder" id="chat-placeholder">
-                <div style="width: 100%; max-width: 400px; padding: 20px; text-align: center;">
-                    <h3 style="margin-bottom: 20px; color: #333;">Quick Message</h3>
+            <nav class="nav-tabs">
+                <button class="nav-tab active" data-tab="tab-gateways">
+                    <span class="tab-icon">🎛️</span> Modem Slots
+                    <span class="badge" id="active-slots-count">0</span>
+                </button>
+                <button class="nav-tab" data-tab="tab-connectors">
+                    <span class="tab-icon">🔌</span> Connectors
+                </button>
+                <button class="nav-tab" data-tab="tab-outbox">
+                    <span class="tab-icon">📋</span> Live Queue & Logs
+                    <span class="badge badge-pulse" id="queue-count">0</span>
+                </button>
+                <button class="nav-tab" data-tab="tab-messenger">
+                    <span class="tab-icon">💬</span> Messenger
+                </button>
+            </nav>
 
-                    <div class="form-group">
-                        <input type="text" id="quick-phone" placeholder="Enter Mobile Number"
-                            style="width: 100%; padding: 12px; border: 1px solid #ddd; border-radius: 8px; font-size: 16px; margin-bottom: 10px;">
+            <div class="nav-status">
+                <span class="status-pill status-online">
+                    <span class="dot"></span> Gateway Online
+                </span>
+            </div>
+        </header>
+
+        <!-- Main Content Area -->
+        <main class="main-body">
+
+            <!-- TAB 1: MODEM SLOTS (GATEWAYS) -->
+            <section class="tab-pane active" id="tab-gateways">
+                <div class="pane-header">
+                    <div>
+                        <h2>GSM Modem Slots (Gateways)</h2>
+                        <p class="pane-subtitle">Manage multi-slot GSM modem pool, prefix routing, and hardware serial ports.</p>
+                    </div>
+                    <div style="display: flex; gap: 10px;">
+                        <button class="btn btn-secondary" id="btn-auto-detect" onclick="triggerAutoDetect()">
+                            <span>⚡</span> Auto-Detect Hardware
+                        </button>
+                        <button class="btn btn-primary" onclick="openAddSlotModal()">
+                            <span>➕</span> Add Modem Slot
+                        </button>
+                    </div>
+                </div>
+
+                <div class="slots-grid" id="slots-grid">
+                    <!-- Injected dynamically via JS -->
+                    <div class="loading-state">Scanning modem slots...</div>
+                </div>
+            </section>
+
+            <!-- TAB 2: CONNECTORS (HOW OTHER SYSTEMS CONNECT) -->
+            <section class="tab-pane" id="tab-connectors">
+                <div class="pane-header">
+                    <div>
+                        <h2>Application Connectors</h2>
+                        <p class="pane-subtitle">Interfaces allowing external systems (Laravel, Billing, Portals) to blast SMS through this gateway.</p>
+                    </div>
+                </div>
+
+                <div class="connectors-grid">
+                    <!-- Connector 1: Diafaan Web Connector -->
+                    <div class="connector-card">
+                        <div class="card-top">
+                            <div class="connector-badge http-badge">HTTP / GET & POST</div>
+                            <span class="pill pill-green">RUNNING</span>
+                        </div>
+                        <h3>Diafaan Web Connector</h3>
+                        <p class="card-desc">Matches Diafaan's exact URL protocol. Zero-code change integration for your Laravel textblaster (<code>sendsms</code>).</p>
+                        
+                        <div class="code-box">
+                            <span class="code-label">Endpoint URL:</span>
+                            <code>http://localhost:8080/http/send-message/?to=09123456789&message=Hello</code>
+                        </div>
+
+                        <div class="config-instructions">
+                            <h4>Laravel <code>.env</code> Configuration:</h4>
+                            <pre><code>SMS_GATEWAY_HOST=127.0.0.1
+SMS_GATEWAY_PORT=8080
+SMS_GATEWAY_USERNAME=admin
+SMS_GATEWAY_PASSWORD=secret</code></pre>
+                        </div>
                     </div>
 
-                    <div class="form-group">
-                        <textarea id="quick-message" placeholder="Type a message..."
-                            style="width: 100%; height: 100px; padding: 12px; border: 1px solid #ddd; border-radius: 8px; font-size: 16px; resize: none; margin-bottom: 15px;"></textarea>
+                    <!-- Connector 2: SQL Outbox Poller Connector -->
+                    <div class="connector-card">
+                        <div class="card-top">
+                            <div class="connector-badge sql-badge">SQL / MySQL Poller</div>
+                            <span class="pill pill-green">ACTIVE (1s loop)</span>
+                        </div>
+                        <h3>MySQL Database Connector</h3>
+                        <p class="card-desc">Watches the <code>outbox</code> table in MySQL (<code>sms_system</code>). Any system can insert rows to blast text messages.</p>
+                        
+                        <div class="code-box">
+                            <span class="code-label">Trigger an SMS from any Database:</span>
+                            <code>INSERT INTO outbox (recipient, message) VALUES ('09123456789', 'Your OTP is 1234');</code>
+                        </div>
+
+                        <div class="config-instructions">
+                            <h4>Table Specification:</h4>
+                            <pre><code>Database: sms_system
+Outbox Table: `outbox` (`id`, `recipient`, `message`, `status`)
+Inbox Table:  `inbox` (`id`, `sender`, `message`, `received_at`)</code></pre>
+                        </div>
                     </div>
 
-                    <button onclick="sendDirectMessage()"
-                        style="width: 100%; padding: 12px; background: #0084ff; color: white; border: none; border-radius: 8px; font-size: 16px; font-weight: 600; cursor: pointer;">
-                        Send Now
+                    <!-- Connector 3: JSON REST API -->
+                    <div class="connector-card">
+                        <div class="card-top">
+                            <div class="connector-badge rest-badge">REST API / JSON</div>
+                            <span class="pill pill-green">AVAILABLE</span>
+                        </div>
+                        <h3>Modern REST API</h3>
+                        <p class="card-desc">Simple JSON endpoint for web applications, Python scripts, Node.js services, or mobile apps.</p>
+                        
+                        <div class="code-box">
+                            <span class="code-label">cURL Example:</span>
+                            <code>curl -X POST http://localhost:8080/api/v1/sms/send \
+  -H "Content-Type: application/json" \
+  -d '{"to": "09123456789", "message": "Notice from ERP"}'</code>
+                        </div>
+
+                        <div class="config-instructions">
+                            <h4>Target Specific Modem Slot (Optional):</h4>
+                            <pre><code>// Pass "gateway" key to target a specific SIM slot:
+{"to": "09123456789", "message": "Hi", "gateway": "Slot 1 (Globe)"}</code></pre>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- TAB 3: LIVE QUEUE & OUTBOX LOGS -->
+            <section class="tab-pane" id="tab-outbox">
+                <div class="pane-header">
+                    <div>
+                        <h2>Live Outbox & Traffic Logs</h2>
+                        <p class="pane-subtitle">Live real-time feed of messages flowing through the gateway from all connected systems.</p>
+                    </div>
+                    <button class="btn btn-secondary" onclick="loadOutboxLogs()">
+                        <span>🔄</span> Refresh Logs
                     </button>
                 </div>
-            </div>
 
-            <!-- Active Chat Interface -->
-            <div id="chat-interface" style="display: none; flex-direction: column; height: 100%;">
-                <div class="chat-header">
-                    <div class="chat-header-info">
-                        <h3 id="chat-name">Select Contact</h3>
-                        <span id="chat-details">...</span>
+                <div class="table-container">
+                    <table class="data-table">
+                        <thead>
+                            <tr>
+                                <th>ID</th>
+                                <th>Timestamp</th>
+                                <th>Recipient</th>
+                                <th>Message</th>
+                                <th>Connector</th>
+                                <th>Dispatched Slot</th>
+                                <th>Status</th>
+                            </tr>
+                        </thead>
+                        <tbody id="outbox-tbody">
+                            <tr>
+                                <td colspan="7" class="empty-cell">Loading live logs...</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </section>
+
+            <!-- TAB 4: DIRECT MESSENGER -->
+            <section class="tab-pane" id="tab-messenger">
+                <div class="messenger-container">
+                    <!-- Sidebar Contacts -->
+                    <div class="sidebar">
+                        <div class="sidebar-header">
+                            <h2>Direct Messages</h2>
+                            <div class="sidebar-actions">
+                                <button onclick="openGroupModal()" title="Department Broadcast">📢</button>
+                                <button onclick="openAddContact()" title="New Contact">➕</button>
+                            </div>
+                        </div>
+                        <div class="search-box">
+                            <input type="text" id="search-input" placeholder="Search contacts...">
+                        </div>
+                        <div class="contact-list" id="contact-list">
+                            <!-- Contacts injected here -->
+                        </div>
+                    </div>
+
+                    <!-- Chat Area -->
+                    <div class="chat-area">
+                        <!-- Quick Send View -->
+                        <div class="chat-placeholder" id="chat-placeholder">
+                            <div class="quick-card">
+                                <h3>Quick Text Blast</h3>
+                                <p class="quick-desc">Send a manual SMS directly through the gateway modem pool.</p>
+
+                                <div class="form-group">
+                                    <label>Recipient Mobile Number</label>
+                                    <input type="text" id="quick-phone" placeholder="09123456789 or +639..." class="input-field">
+                                </div>
+
+                                <div class="form-group">
+                                    <label>Preferred Modem Slot (Optional)</label>
+                                    <select id="quick-slot" class="input-field">
+                                        <option value="">Auto-Route (Smart Prefix / Round Robin)</option>
+                                    </select>
+                                </div>
+
+                                <div class="form-group">
+                                    <label>Message</label>
+                                    <textarea id="quick-message" placeholder="Type your message..." class="input-field textarea-field"></textarea>
+                                </div>
+
+                                <button onclick="sendDirectMessage()" class="btn btn-primary btn-block">
+                                    Send Message Now
+                                </button>
+                            </div>
+                        </div>
+
+                        <!-- Active Conversation -->
+                        <div id="chat-interface" style="display: none; flex-direction: column; height: 100%;">
+                            <div class="chat-header">
+                                <div class="chat-header-info">
+                                    <h3 id="chat-name">Select Contact</h3>
+                                    <span id="chat-details">...</span>
+                                </div>
+                            </div>
+                            <div class="messages-container" id="messages-container"></div>
+                            <div class="input-area">
+                                <textarea id="message-input" placeholder="Type a message..."></textarea>
+                                <button class="send-btn" id="send-btn">
+                                    <svg viewBox="0 0 24 24"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"></path></svg>
+                                </button>
+                            </div>
+                        </div>
                     </div>
                 </div>
+            </section>
 
-                <div class="messages-container" id="messages-container">
-                    <!-- Messages injected here -->
-                </div>
+        </main>
+    </div>
 
-                <div class="input-area">
-                    <textarea id="message-input" placeholder="Type a message..."></textarea>
-                    <button class="send-btn" id="send-btn">
-                        <svg viewBox="0 0 24 24">
-                            <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"></path>
-                        </svg>
-                    </button>
+    <!-- MODAL: ADD MODEM SLOT -->
+    <div class="modal" id="add-slot-modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3>Add GSM Modem Slot</h3>
+                <span class="close-modal" onclick="closeAddSlotModal()">&times;</span>
+            </div>
+            <div class="modal-body">
+                <div class="form-group">
+                    <label>Slot Name</label>
+                    <input type="text" id="slot-name" placeholder="e.g. Slot 5 (Globe 2)" class="input-field">
                 </div>
+                <div class="form-group">
+                    <label>Physical COM Port (Auto-detected from Windows)</label>
+                    <div class="port-select-row">
+                        <select id="slot-port" class="input-field">
+                            <option value="">Scanning hardware...</option>
+                        </select>
+                        <button type="button" class="btn btn-small" onclick="scanHardwarePorts()">Scan</button>
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label>Baud Rate</label>
+                    <select id="slot-baud" class="input-field">
+                        <option value="115200">115200 (Standard for GSM/LTE)</option>
+                        <option value="9600">9600 (Legacy Wavecom/Siemens)</option>
+                        <option value="57600">57600</option>
+                        <option value="38400">38400</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>SIM Operator / Carrier</label>
+                    <select id="slot-operator" class="input-field">
+                        <option value="Auto">Auto Detect</option>
+                        <option value="Globe">Globe / TM</option>
+                        <option value="Smart">Smart / TNT</option>
+                        <option value="DITO">DITO</option>
+                        <option value="Sun">Sun Cellular</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>Prefix Filter (Optional)</label>
+                    <input type="text" id="slot-prefixes" placeholder="Comma separated, e.g. 0917,0927,0915" class="input-field">
+                    <small class="form-hint">Messages to numbers matching these prefixes will automatically route through this slot.</small>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" onclick="closeAddSlotModal()">Cancel</button>
+                <button class="btn btn-primary" onclick="saveNewSlot()">Save Slot</button>
             </div>
         </div>
     </div>
 
-    <!-- Add Contact Modal -->
+    <!-- MODAL: ADD CONTACT -->
     <div class="modal" id="contact-modal">
         <div class="modal-content">
             <div class="modal-header">
@@ -89,26 +323,29 @@
             </div>
             <div class="form-group">
                 <label>Name</label>
-                <input type="text" id="new-name" placeholder="John Doe">
+                <input type="text" id="new-name" placeholder="John Doe" class="input-field">
             </div>
             <div class="form-group">
                 <label>Phone Number</label>
-                <input type="text" id="new-phone" placeholder="+639...">
+                <input type="text" id="new-phone" placeholder="09123456789" class="input-field">
             </div>
             <div class="form-group">
                 <label>Department</label>
-                <select id="new-dept">
+                <select id="new-dept" class="input-field">
                     <option value="IT">IT</option>
                     <option value="HR">HR</option>
                     <option value="Finance">Finance</option>
                     <option value="Operations">Operations</option>
                 </select>
             </div>
-            <button class="form-btn" onclick="saveContact()">Save Contact</button>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" onclick="closeAddContact()">Cancel</button>
+                <button class="btn btn-primary" onclick="saveContact()">Save Contact</button>
+            </div>
         </div>
     </div>
 
-    <!-- Group Message Modal -->
+    <!-- MODAL: DEPARTMENT BROADCAST -->
     <div class="modal" id="group-modal">
         <div class="modal-content">
             <div class="modal-header">
@@ -117,7 +354,7 @@
             </div>
             <div class="form-group">
                 <label>Select Department</label>
-                <select id="group-dept">
+                <select id="group-dept" class="input-field">
                     <option value="IT">IT</option>
                     <option value="HR">HR</option>
                     <option value="Finance">Finance</option>
@@ -126,13 +363,14 @@
             </div>
             <div class="form-group">
                 <label>Message</label>
-                <textarea id="group-msg"
-                    style="width:100%; height:80px; padding:10px; border-radius:6px; border:1px solid #ddd;"></textarea>
+                <textarea id="group-msg" class="input-field textarea-field"></textarea>
             </div>
-            <button class="form-btn" onclick="sendGroup()">Send Broadcast</button>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" onclick="closeGroupModal()">Cancel</button>
+                <button class="btn btn-primary" onclick="sendGroup()">Send Broadcast</button>
+            </div>
         </div>
     </div>
 
 </body>
-
 </html>

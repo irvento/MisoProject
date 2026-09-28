@@ -3,6 +3,10 @@ TITLE Miso SMS System
 ECHO Starting Miso SMS Application...
 ECHO.
 
+:: Enable UTF-8 encoding in Windows console
+chcp 65001 >nul
+set PYTHONUTF8=1
+
 :: Change directory to the script location to ensure relative paths work
 cd /d "%~dp0"
 
@@ -11,3 +15,4 @@ python MISOPROJ\MISOPROJ.py
 
 :: Pause so the window doesn't close immediately if it crashes
 PAUSE
+

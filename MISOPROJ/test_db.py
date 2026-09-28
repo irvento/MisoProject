@@ -1,7 +1,15 @@
+import sys
 import pymysql # type: ignore
 
+if sys.platform == "win32":
+    try:
+        sys.stdout.reconfigure(encoding='utf-8')
+        sys.stderr.reconfigure(encoding='utf-8')
+    except Exception:
+        pass
 
 print("🚀 Starting test_db.py...")
+
 
 try:
     print("🔍 Attempting to connect to the database...")

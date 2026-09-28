@@ -1,4 +1,12 @@
+import sys
 import pymysql
+
+if sys.platform == "win32":
+    try:
+        sys.stdout.reconfigure(encoding='utf-8')
+        sys.stderr.reconfigure(encoding='utf-8')
+    except Exception:
+        pass
 
 DB_CONFIG = {
     "host": "127.0.0.1",
@@ -39,6 +47,16 @@ def seed_database():
                     department VARCHAR(50)
                 )
             """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS sms_logs (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    phone_number VARCHAR(20) NOT NULL,
+                    message TEXT NOT NULL,
+                    status VARCHAR(50) NOT NULL,
+                    sent_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+
             
             # Check for 'name' column existence
             cursor.execute("DESCRIBE contacts")

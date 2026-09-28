@@ -1,8 +1,31 @@
+import sys
 import requests
 import time
-import sys
 
-BASE_URL = "http://127.0.0.1:5000"
+if sys.platform == "win32":
+    try:
+        sys.stdout.reconfigure(encoding='utf-8')
+        sys.stderr.reconfigure(encoding='utf-8')
+    except Exception:
+        pass
+
+import os
+
+def get_base_url():
+    if "PORT" in os.environ:
+        return f"http://127.0.0.1:{os.environ['PORT']}"
+    for p in [8080, 5000, 5001]:
+        try:
+            r = requests.get(f"http://127.0.0.1:{p}/api/init_data", timeout=0.5)
+            if r.status_code == 200:
+                return f"http://127.0.0.1:{p}"
+        except Exception:
+            pass
+    return "http://127.0.0.1:8080"
+
+BASE_URL = get_base_url()
+
+
 
 def test_endpoints():
     print("🚀 Starting API Tests against", BASE_URL)
