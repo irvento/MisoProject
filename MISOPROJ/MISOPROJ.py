@@ -97,6 +97,16 @@ def init_db():
                 )
             """)
             
+            # Ensure gateways has sim_number, iccid, and imsi columns
+            cursor.execute("DESCRIBE gateways")
+            gw_cols = [row[0] for row in cursor.fetchall()]
+            if 'sim_number' not in gw_cols:
+                cursor.execute("ALTER TABLE gateways ADD COLUMN sim_number VARCHAR(50) NULL AFTER sim_operator")
+            if 'iccid' not in gw_cols:
+                cursor.execute("ALTER TABLE gateways ADD COLUMN iccid VARCHAR(50) NULL AFTER sim_number")
+            if 'imsi' not in gw_cols:
+                cursor.execute("ALTER TABLE gateways ADD COLUMN imsi VARCHAR(50) NULL AFTER iccid")
+            
             # Connector registration table
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS connectors (
@@ -170,16 +180,20 @@ init_db()
 
 class ModemSlot:
     """Represents a single physical or virtual slot on the GSM modem pool"""
-    def __init__(self, slot_id, name, port_name, baudrate=115200, sim_operator='Auto', prefix_filter=''):
+    def __init__(self, slot_id, name, port_name, baudrate=115200, sim_operator='Auto', prefix_filter='', sim_number=None, iccid=None, imsi=None):
         self.id = slot_id
         self.name = name
         self.port_name = port_name
         self.baudrate = baudrate
         self.sim_operator = sim_operator
         self.prefix_filter = [p.strip() for p in prefix_filter.split(',') if p.strip()]
+        self.sim_number = sim_number
+        self.iccid = iccid
+        self.imsi = imsi
         self.ser = None
         self.is_mock = False
         self.status = "INITIALIZING"
+        self.last_error = None
         self.signal_csq = 18 # Default healthy signal for display
         self.sent_count = 0
         self.failed_count = 0
@@ -193,17 +207,161 @@ class ModemSlot:
                 self.ser = serial.Serial(self.port_name, baudrate=self.baudrate, timeout=2)
                 self.is_mock = False
                 self.status = "ONLINE"
+                self.last_error = None
                 print(f"✅ [MODEM SLOT] {self.name} connected on {self.port_name} ({self.baudrate} baud)")
                 self._send_at("AT")
                 self._send_at("ATE0")
                 self._send_at("AT+CMEE=1")
                 self._send_at("AT+CMGF=1") # Text mode
                 self.update_signal()
+                self.read_sim_card_details(force_open=False)
             except Exception as e:
                 self.is_mock = True
                 self.status = "MOCK"
                 self.ser = None
-                print(f"⚠️ [MODEM SLOT] {self.name} ({self.port_name}) not physically detected -> Running in MOCK MODE")
+                self.last_error = str(e)
+                print(f"⚠️ [MODEM SLOT] {self.name} ({self.port_name}) not physically detected -> Running in MOCK MODE (Error: {e})")
+
+    def read_sim_card_details(self, force_open=True):
+        """Reads SIM Card Phone Number (+CNUM), ICCID (+CCID), and IMSI (+CIMI)"""
+        if force_open and not self.ser:
+            self.open_port()
+        if self.is_mock or not self.ser:
+            return {
+                "sim_number": self.sim_number,
+                "iccid": self.iccid,
+                "imsi": self.imsi,
+                "operator": self.sim_operator,
+                "cpin": "MOCK",
+                "error": self.last_error
+            }
+        with self.lock:
+            try:
+                # 1. Check CPIN (PIN status)
+                cpin_raw = self._send_at("AT+CPIN?", delay=0.3)
+                cpin = "READY" if "READY" in cpin_raw else cpin_raw.replace("\r", " ").replace("\n", " ").strip()
+
+                # 2. Try to query Phone Number via AT+CNUM
+                num = None
+                cnum_raw = self._send_at("AT+CNUM", delay=0.5)
+                if "+CNUM:" in cnum_raw:
+                    for line in cnum_raw.splitlines():
+                        if "+CNUM:" in line:
+                            parts = line.split("+CNUM:")[1].split(",")
+                            if len(parts) >= 2:
+                                parsed_num = parts[1].replace('"', '').strip()
+                                if parsed_num:
+                                    num = parsed_num
+                                    break
+                
+                # 3. Query ICCID (SIM card serial number, 19-20 digits)
+                iccid = None
+                for cmd in ["AT+CCID", "AT+QCCID", "AT^ICCID?"]:
+                    ccid_raw = self._send_at(cmd, delay=0.3)
+                    clean = ccid_raw.replace("OK", "").replace("+CCID:", "").replace("+QCCID:", "").replace("^ICCID:", "").strip()
+                    digits = "".join([c for c in clean if c.isdigit()])
+                    if len(digits) >= 15:
+                        iccid = digits
+                        break
+
+                # 4. Query IMSI (15 digits)
+                imsi = None
+                cimi_raw = self._send_at("AT+CIMI", delay=0.3)
+                clean_imsi = "".join([c for c in cimi_raw.replace("OK", "").strip() if c.isdigit()])
+                if len(clean_imsi) >= 10:
+                    imsi = clean_imsi
+
+                # 5. Query Operator via AT+COPS?
+                cops_raw = self._send_at("AT+COPS?", delay=0.4)
+                operator = self.sim_operator
+                if ',"' in cops_raw:
+                    try:
+                        operator = cops_raw.split(',"')[1].split('"')[0].strip()
+                    except Exception:
+                        pass
+
+                if num:
+                    self.sim_number = num
+                if iccid:
+                    self.iccid = iccid
+                if imsi:
+                    self.imsi = imsi
+                if operator and operator != "Auto":
+                    self.sim_operator = operator
+
+                self._update_sim_db()
+
+                return {
+                    "sim_number": self.sim_number,
+                    "iccid": self.iccid,
+                    "imsi": self.imsi,
+                    "operator": self.sim_operator,
+                    "cpin": cpin
+                }
+            except Exception as e:
+                print(f"Error reading SIM on {self.name}: {e}")
+                return {
+                    "sim_number": self.sim_number,
+                    "iccid": self.iccid,
+                    "imsi": self.imsi,
+                    "operator": self.sim_operator,
+                    "cpin": f"Error: {e}"
+                }
+
+    def _update_sim_db(self):
+        try:
+            conn = get_db_connection()
+            if conn:
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        UPDATE gateways 
+                        SET sim_number=%s, iccid=%s, imsi=%s, sim_operator=%s 
+                        WHERE id=%s
+                    """, (self.sim_number, self.iccid, self.imsi, self.sim_operator, self.id))
+                conn.close()
+        except Exception:
+            pass
+
+    def check_incoming_sms(self):
+        """Checks SIM card memory for incoming SMS (AT+CMGL) and saves to inbox table"""
+        if self.is_mock or not self.ser:
+            return []
+        received = []
+        with self.lock:
+            try:
+                self._send_at("AT+CMGF=1") # Text mode
+                resp = self._send_at('AT+CMGL="ALL"', delay=1.0)
+                lines = resp.splitlines()
+                idx = 0
+                while idx < len(lines):
+                    line = lines[idx].strip()
+                    if line.startswith("+CMGL:"):
+                        parts = line.split(",")
+                        sender = ""
+                        if len(parts) >= 3:
+                            sender = parts[2].replace('"', '').strip()
+                        msg_body = ""
+                        if idx + 1 < len(lines):
+                            next_l = lines[idx + 1].strip()
+                            if not next_l.startswith("+CMGL:") and next_l != "OK":
+                                msg_body = next_l
+                        
+                        if sender and msg_body:
+                            received.append({"sender": sender, "message": msg_body, "received_port": self.port_name})
+                            try:
+                                conn = get_db_connection()
+                                if conn:
+                                    with conn.cursor() as cur:
+                                        cur.execute("SELECT id FROM inbox WHERE sender = %s AND message = %s AND received_port = %s LIMIT 1", (sender, msg_body, self.port_name))
+                                        if not cur.fetchone():
+                                            cur.execute("INSERT INTO inbox (sender, message, received_port, received_at) VALUES (%s, %s, %s, NOW())", (sender, msg_body, self.port_name))
+                                    conn.close()
+                            except Exception:
+                                pass
+                    idx += 1
+            except Exception as e:
+                print(f"Error checking incoming SMS on {self.name}: {e}")
+        return received
 
     def _send_at(self, cmd, delay=0.3):
         if self.is_mock or not self.ser:
@@ -308,6 +466,9 @@ class ModemSlot:
             "port": self.port_name,
             "baudrate": self.baudrate,
             "sim_operator": self.sim_operator,
+            "sim_number": self.sim_number,
+            "iccid": self.iccid,
+            "imsi": self.imsi,
             "prefix_filter": ",".join(self.prefix_filter),
             "is_active": self.is_active,
             "signal_csq": self.signal_csq,
@@ -333,7 +494,7 @@ class GatewayManager:
                 return
             try:
                 with conn.cursor() as cur:
-                    cur.execute("SELECT id, name, port, baudrate, sim_operator, prefix_filter, is_active, sent_count, failed_count FROM gateways")
+                    cur.execute("SELECT id, name, port, baudrate, sim_operator, prefix_filter, is_active, sent_count, failed_count, sim_number, iccid, imsi FROM gateways")
                     rows = cur.fetchall()
                 
                 existing_ids = set()
@@ -341,7 +502,7 @@ class GatewayManager:
                     slot_id = r[0]
                     existing_ids.add(slot_id)
                     if slot_id not in self.slots:
-                        slot = ModemSlot(slot_id, r[1], r[2], r[3], r[4], r[5] or "")
+                        slot = ModemSlot(slot_id, r[1], r[2], r[3], r[4], r[5] or "", sim_number=r[9], iccid=r[10], imsi=r[11])
                         slot.is_active = bool(r[6])
                         slot.sent_count = r[7] or 0
                         slot.failed_count = r[8] or 0
@@ -351,6 +512,9 @@ class GatewayManager:
                         self.slots[slot_id].name = r[1]
                         self.slots[slot_id].is_active = bool(r[6])
                         self.slots[slot_id].prefix_filter = [p.strip() for p in (r[5] or "").split(',') if p.strip()]
+                        self.slots[slot_id].sim_number = r[9]
+                        self.slots[slot_id].iccid = r[10]
+                        self.slots[slot_id].imsi = r[11]
 
                 # Clean up removed slots
                 for sid in list(self.slots.keys()):
@@ -682,6 +846,17 @@ def diafaan_connector_endpoint():
 @app.route('/send-sms', methods=['POST'])
 @app.route('/api/send', methods=['POST'])
 def send_message_rest():
+    expected_api_key = os.environ.get('GATEWAY_API_KEY')
+    if expected_api_key:
+        auth_header = request.headers.get('Authorization')
+        api_key_header = request.headers.get('X-API-Key')
+        provided_key = api_key_header
+        if not provided_key and auth_header and auth_header.startswith('Bearer '):
+            provided_key = auth_header.split(' ')[1]
+        
+        if provided_key != expected_api_key:
+            return jsonify({"success": False, "error": "Unauthorized: Invalid or missing API Key"}), 401
+
     data = request.get_json(silent=True) or {}
     target = data.get('target') or data.get('phone_number') or data.get('to')
     message = data.get('message')
@@ -756,16 +931,188 @@ def manage_gateways_api():
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
 
-@app.route('/api/v1/gateways/<int:gw_id>', methods=['DELETE'])
-def delete_gateway_api(gw_id):
+@app.route('/api/v1/gateways/<int:gw_id>', methods=['GET', 'PUT', 'POST', 'DELETE'])
+def manage_single_gateway_api(gw_id):
+    if request.method == 'DELETE':
+        conn = get_db_connection()
+        if conn:
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM gateways WHERE id = %s", (gw_id,))
+            conn.close()
+            gateway_manager.load_slots_from_db()
+            return jsonify({"success": True, "message": "Gateway slot removed"})
+        return jsonify({"success": False, "error": "Database error"}), 500
+
+    slot = gateway_manager.slots.get(gw_id)
+    if not slot:
+        return jsonify({"success": False, "error": "Gateway slot not found"}), 404
+
+    if request.method == 'GET':
+        return jsonify({"success": True, "slot": slot.to_dict()})
+
+    # PUT or POST: Update configuration settings
+    data = request.get_json(silent=True) or {}
+    name = data.get('name', slot.name).strip()
+    port = data.get('port', slot.port_name).strip()
+    baudrate = int(data.get('baudrate', slot.baudrate))
+    sim_operator = data.get('sim_operator', slot.sim_operator).strip()
+    sim_number = data.get('sim_number', slot.sim_number or '').strip()
+    prefix_filter = data.get('prefix_filter', ','.join(slot.prefix_filter)).strip()
+    is_active = 1 if data.get('is_active', slot.is_active) else 0
+
     conn = get_db_connection()
-    if conn:
+    if not conn:
+        return jsonify({"success": False, "error": "Database error"}), 500
+
+    try:
         with conn.cursor() as cur:
-            cur.execute("DELETE FROM gateways WHERE id = %s", (gw_id,))
+            cur.execute("""
+                UPDATE gateways 
+                SET name = %s, port = %s, baudrate = %s, sim_operator = %s, 
+                    sim_number = %s, prefix_filter = %s, is_active = %s 
+                WHERE id = %s
+            """, (name, port, baudrate, sim_operator, sim_number, prefix_filter, is_active, gw_id))
         conn.close()
-        gateway_manager.load_slots_from_db()
-        return jsonify({"success": True, "message": "Gateway slot removed"})
-    return jsonify({"success": False, "error": "Database error"}), 500
+
+        reconnect_needed = (port.upper() != slot.port_name.upper() or baudrate != slot.baudrate)
+        slot.name = name
+        slot.sim_operator = sim_operator
+        slot.sim_number = sim_number
+        slot.prefix_filter = [p.strip() for p in prefix_filter.split(',') if p.strip()]
+        slot.is_active = bool(is_active)
+
+        if reconnect_needed:
+            if slot.ser:
+                try:
+                    slot.ser.close()
+                except Exception:
+                    pass
+                slot.ser = None
+            slot.port_name = port
+            slot.baudrate = baudrate
+            slot.open_port()
+
+        return jsonify({"success": True, "message": "Configuration saved successfully", "slot": slot.to_dict()})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+@app.route('/api/v1/gateways/<int:gw_id>/logs', methods=['GET'])
+def get_gateway_slot_logs_api(gw_id):
+    slot = gateway_manager.slots.get(gw_id)
+    if not slot:
+        return jsonify({"success": False, "error": "Gateway not found"}), 404
+
+    # Optionally trigger reading SMS from SIM if requested
+    if request.args.get('check_inbox') == '1' and slot.ser and not slot.is_mock:
+        slot.check_incoming_sms()
+
+    conn = get_db_connection()
+    if not conn:
+        return jsonify({"success": False, "error": "Database error"}), 500
+
+    try:
+        sent_logs = []
+        received_logs = []
+        with conn.cursor() as cur:
+            # Query sent logs from outbox
+            cur.execute("""
+                SELECT recipient, message, status, connector, created_at 
+                FROM outbox 
+                WHERE dispatched_via = %s OR dispatched_via LIKE %s 
+                ORDER BY created_at DESC LIMIT 50
+            """, (slot.name, f"%{slot.port_name}%"))
+            for r in cur.fetchall():
+                sent_logs.append({
+                    "recipient": r[0],
+                    "message": r[1],
+                    "status": r[2],
+                    "connector": r[3],
+                    "time": r[4].strftime("%Y-%m-%d %H:%M:%S") if r[4] else None
+                })
+
+            # If outbox empty, check legacy sms_logs
+            if not sent_logs:
+                cur.execute("""
+                    SELECT phone_number, message, status, sent_at 
+                    FROM sms_logs 
+                    WHERE message LIKE %s 
+                    ORDER BY sent_at DESC LIMIT 50
+                """, (f"%[{slot.name}]%",))
+                for r in cur.fetchall():
+                    clean_msg = r[1].replace(f"[{slot.name}]", "").strip()
+                    sent_logs.append({
+                        "recipient": r[0],
+                        "message": clean_msg,
+                        "status": r[2],
+                        "connector": "DIRECT",
+                        "time": r[3].strftime("%Y-%m-%d %H:%M:%S") if r[3] else None
+                    })
+
+            # Query received logs from inbox
+            cur.execute("""
+                SELECT sender, message, received_port, received_at 
+                FROM inbox 
+                WHERE received_port = %s OR received_port = %s 
+                ORDER BY received_at DESC LIMIT 50
+            """, (slot.port_name, slot.name))
+            for r in cur.fetchall():
+                received_logs.append({
+                    "sender": r[0],
+                    "message": r[1],
+                    "port": r[2],
+                    "time": r[3].strftime("%Y-%m-%d %H:%M:%S") if r[3] else None
+                })
+
+        return jsonify({
+            "success": True,
+            "slot_id": gw_id,
+            "slot_name": slot.name,
+            "port": slot.port_name,
+            "sent": sent_logs,
+            "received": received_logs
+        })
+    finally:
+        conn.close()
+
+@app.route('/api/v1/gateways/<int:gw_id>/at-command', methods=['POST'])
+def gateway_at_command_api(gw_id):
+    slot = gateway_manager.slots.get(gw_id)
+    if not slot:
+        return jsonify({"success": False, "error": "Gateway not found"}), 404
+    data = request.get_json(silent=True) or {}
+    cmd = data.get('command', '').strip()
+    if not cmd:
+        return jsonify({"success": False, "error": "Command is required"}), 400
+
+    if (not slot.ser or not slot.ser.is_open) and not slot.is_mock:
+        slot.open_port()
+
+    if slot.ser and slot.ser.is_open and not slot.is_mock:
+        resp = slot._send_at(cmd, delay=0.5)
+        return jsonify({"success": True, "command": cmd, "response": resp})
+
+    cmd_clean = cmd.upper().strip()
+    mock_responses = {
+        "AT": "OK",
+        "AT+CSQ": "+CSQ: 18,0\r\n\r\nOK",
+        "AT+CPIN?": "+CPIN: READY\r\n\r\nOK",
+        "AT+COPS?": f'+COPS: 0,0,"{slot.sim_operator}"\r\n\r\nOK',
+        "AT+CCID": f'+CCID: "{slot.iccid or "89634252475512838177"}"\r\n\r\nOK',
+        "ATI": "Wavecom MULTIBAND 900E 1800\r\nRevision: 651_09gg.2Q\r\n\r\nOK",
+        "AT+CGMM": "MULTIBAND 900E 1800\r\nOK",
+        "AT+CMGF=1": "OK",
+        "AT+CMGL=\"ALL\"": "OK"
+    }
+    resp = mock_responses.get(cmd_clean, "OK\r\n(Simulated response - Mock Mode)")
+    return jsonify({"success": True, "command": cmd, "response": resp, "is_mock": True})
+
+@app.route('/api/v1/gateways/<int:gw_id>/check-inbox', methods=['POST'])
+def gateway_check_inbox_api(gw_id):
+    slot = gateway_manager.slots.get(gw_id)
+    if not slot:
+        return jsonify({"success": False, "error": "Gateway not found"}), 404
+    msgs = slot.check_incoming_sms()
+    return jsonify({"success": True, "new_messages_count": len(msgs), "messages": msgs})
 
 @app.route('/api/v1/gateways/<int:gw_id>/toggle', methods=['POST'])
 def toggle_gateway_api(gw_id):
@@ -777,6 +1124,31 @@ def toggle_gateway_api(gw_id):
         gateway_manager.load_slots_from_db()
         return jsonify({"success": True, "message": "Gateway status toggled"})
     return jsonify({"success": False, "error": "Database error"}), 500
+
+@app.route('/api/v1/gateways/<int:gw_id>/sim', methods=['GET', 'POST'])
+def manage_gateway_sim_api(gw_id):
+    slot = gateway_manager.slots.get(gw_id)
+    if not slot:
+        return jsonify({"success": False, "error": "Gateway slot not found"}), 404
+
+    if request.method == 'GET':
+        sim_data = slot.read_sim_card_details()
+        return jsonify({"success": True, "slot_id": gw_id, "sim_info": sim_data})
+
+    # POST: Update/Save custom SIM number
+    data = request.get_json(silent=True) or {}
+    sim_number = data.get('sim_number', '').strip()
+    slot.sim_number = sim_number
+    slot._update_sim_db()
+    return jsonify({"success": True, "slot_id": gw_id, "sim_number": sim_number})
+
+@app.route('/api/v1/gateways/sim-scan', methods=['POST'])
+def scan_all_sims_api():
+    results = {}
+    for slot_id, slot in gateway_manager.slots.items():
+        if slot.is_active:
+            results[slot.name] = slot.read_sim_card_details()
+    return jsonify({"success": True, "sim_cards": results})
 
 @app.route('/api/v1/system/ports', methods=['GET'])
 def scan_system_ports_api():

@@ -373,6 +373,66 @@ body {
 .carrier-dito  { background: var(--carrier-dito); }
 .carrier-auto  { background: #64748b; }
 
+/* SIM Card Details Badge */
+.sim-badge-container {
+    background: #f1f5f9;
+    border: 1px solid #cbd5e1;
+    border-radius: 6px;
+    padding: 8px 10px;
+    margin-bottom: 12px;
+}
+
+.sim-number-display {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 13px;
+}
+
+.sim-num-label {
+    font-weight: 600;
+    color: #475569;
+}
+
+.sim-num-val {
+    color: #0f172a;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 13px;
+    font-weight: 700;
+}
+
+.btn-xs-action {
+    background: #ffffff;
+    border: 1px solid #cbd5e1;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 11px;
+    padding: 1px 5px;
+    line-height: 1.2;
+    transition: all 0.15s ease;
+}
+
+.btn-xs-action:hover {
+    background: #e2e8f0;
+    border-color: #94a3b8;
+    transform: scale(1.05);
+}
+
+.sim-meta-item {
+    font-size: 11px;
+    color: #64748b;
+    margin-top: 4px;
+    font-family: 'JetBrains Mono', monospace;
+}
+
+.sim-meta-item code {
+    background: #ffffff;
+    padding: 1px 4px;
+    border-radius: 3px;
+    border: 1px solid #e2e8f0;
+    color: #334155;
+}
+
 /* Signal Strength Meter */
 .signal-container {
     background: #f8fafc;
@@ -930,4 +990,227 @@ body {
     display: flex;
     justify-content: flex-end;
     gap: 10px;
+}
+
+/* ==========================================================================
+   SLOT DETAILS & CONFIGURATION MODAL STYLES
+   ========================================================================== */
+.slot-modal-title {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+.clickable-slot-card {
+    cursor: pointer;
+    transition: transform 0.2s ease, box-shadow 0.2s ease, border-color 0.2s ease;
+}
+
+.clickable-slot-card:hover {
+    transform: translateY(-3px);
+    box-shadow: 0 10px 25px -5px rgba(0, 102, 255, 0.15), 0 8px 10px -6px rgba(0, 102, 255, 0.1);
+    border-color: #93c5fd;
+}
+
+.modal-content.modal-large {
+    max-width: 840px;
+    max-height: 90vh;
+    display: flex;
+    flex-direction: column;
+}
+
+.modal-content.modal-large .modal-body {
+    overflow-y: auto;
+    max-height: calc(90vh - 150px);
+    padding: 20px 24px;
+}
+
+.modal-tab-nav {
+    display: flex;
+    gap: 6px;
+    background: #f1f5f9;
+    padding: 8px 18px;
+    border-bottom: 1px solid #e2e8f0;
+    flex-shrink: 0;
+}
+
+.modal-tab-btn {
+    background: transparent;
+    border: none;
+    padding: 8px 16px;
+    font-size: 13px;
+    font-weight: 600;
+    color: #64748b;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    transition: all 0.18s ease;
+}
+
+.modal-tab-btn:hover {
+    color: #0f172a;
+    background: rgba(255, 255, 255, 0.7);
+}
+
+.modal-tab-btn.active {
+    color: #0066ff;
+    background: #ffffff;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+}
+
+.modal-tab-pane {
+    display: none;
+}
+
+.modal-tab-pane.active {
+    display: block;
+    animation: fadeIn 0.18s ease;
+}
+
+@keyframes fadeIn {
+    from { opacity: 0; transform: translateY(2px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+
+.form-row-2 {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+    margin-bottom: 12px;
+}
+
+.port-select-row {
+    display: flex;
+    gap: 8px;
+}
+
+.port-select-row select {
+    flex: 1;
+}
+
+.form-hint {
+    display: block;
+    font-size: 11px;
+    color: #64748b;
+    margin-top: 4px;
+}
+
+.hardware-meta-box {
+    margin-top: 18px;
+    background: #f8fafc;
+    border: 1px solid #e2e8f0;
+    border-radius: var(--radius-sm);
+    padding: 14px 18px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    font-size: 12px;
+}
+
+.meta-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.meta-row code {
+    font-family: 'JetBrains Mono', monospace;
+    background: #e2e8f0;
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-size: 12px;
+    color: #0f172a;
+}
+
+.log-pane-toolbar {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 12px;
+}
+
+.log-info-label {
+    font-size: 13px;
+    color: #64748b;
+    font-weight: 500;
+}
+
+.modal-table-box {
+    max-height: 380px;
+    overflow-y: auto;
+    border: 1px solid #e2e8f0;
+    border-radius: var(--radius-sm);
+}
+
+.modal-table-box table {
+    margin-bottom: 0;
+}
+
+/* Terminal Screen Styles */
+.terminal-quick-bar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 12px;
+    font-size: 12px;
+    color: #64748b;
+}
+
+.btn-terminal-cmd {
+    background: #f1f5f9;
+    border: 1px solid #cbd5e1;
+    border-radius: 4px;
+    padding: 4px 10px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    cursor: pointer;
+    font-weight: 600;
+    color: #334155;
+    transition: all 0.15s ease;
+}
+
+.btn-terminal-cmd:hover {
+    background: #0066ff;
+    color: #fff;
+    border-color: #0066ff;
+}
+
+.terminal-screen {
+    background: #0b1120;
+    color: #38bdf8;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 12px;
+    padding: 16px;
+    border-radius: var(--radius-sm);
+    min-height: 220px;
+    max-height: 300px;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    border: 1px solid #1e293b;
+    box-shadow: inset 0 2px 8px rgba(0,0,0,0.5);
+}
+
+.term-line {
+    white-space: pre-wrap;
+    word-break: break-all;
+    line-height: 1.45;
+}
+
+.term-line.info { color: #94a3b8; }
+.term-line.cmd { color: #c084fc; font-weight: 600; }
+.term-line.out, .term-line.resp { color: #4ade80; }
+.term-line.err, .term-line.error { color: #f87171; }
+
+.terminal-input-row {
+    display: flex;
+    gap: 8px;
+    margin-top: 12px;
+}
+
+.terminal-input {
+    flex: 1;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 12px;
 }

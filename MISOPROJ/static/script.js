@@ -6,6 +6,7 @@ let CONTACTS = [];
 let GROUPS = [];
 let ACTIVE_CONV = null;
 let GATEWAY_SLOTS = [];
+let SYSTEM_PORTS = [];
 
 $(document).ready(function () {
     initApp();
@@ -111,7 +112,7 @@ function renderSlotsGrid(slots) {
         const prefixes = slot.prefix_filter ? `Prefixes: ${slot.prefix_filter}` : 'All Networks (Round Robin)';
 
         const card = `
-            <div class="slot-card">
+            <div class="slot-card clickable-slot-card" data-slot-id="${slot.id}" onclick="openSlotDetailsModal(${slot.id})" title="Click to view settings, send/receive logs, and AT terminal">
                 <div>
                     <div class="slot-card-header">
                         <div class="slot-title-group">
@@ -122,6 +123,17 @@ function renderSlotsGrid(slots) {
                     </div>
 
                     <span class="carrier-tag ${operatorClass}">${escapeHtml(slot.sim_operator || 'Auto')}</span>
+
+                    <div class="sim-badge-container" title="Click to configure SIM settings and view logs">
+                        <div class="sim-number-display" style="cursor: pointer;" onclick="openSlotDetailsModal(${slot.id})">
+                            <span class="sim-num-label">📱 SIM:</span>
+                            <strong class="sim-num-val" id="sim-val-${slot.id}">${escapeHtml(slot.sim_number || 'Unassigned / Not on SIM')}</strong>
+                            <button class="btn-xs-action" title="Quick Set/Edit Phone Number" onclick="event.stopPropagation(); editSimNumber(${slot.id}, '${escapeHtml(slot.sim_number || '')}')">✏️</button>
+                            <button class="btn-xs-action" title="Query SIM from Modem" onclick="event.stopPropagation(); scanSlotSim(${slot.id}, this)">🔄</button>
+                        </div>
+                        ${slot.iccid ? `<div class="sim-meta-item">💳 ICCID: <code>${escapeHtml(slot.iccid)}</code></div>` : ''}
+                        ${slot.imsi ? `<div class="sim-meta-item">🆔 IMSI: <code>${escapeHtml(slot.imsi)}</code></div>` : ''}
+                    </div>
 
                     <div class="signal-container">
                         <span class="signal-label">Signal: ${qualityText}</span>
@@ -145,10 +157,13 @@ function renderSlotsGrid(slots) {
                     </div>
 
                     <div class="slot-actions">
-                        <button class="btn btn-small" onclick="toggleSlotStatus(${slot.id})">
+                        <button class="btn btn-small btn-primary" onclick="event.stopPropagation(); openSlotDetailsModal(${slot.id})">
+                            ⚙️ Configure &amp; Logs
+                        </button>
+                        <button class="btn btn-small" onclick="event.stopPropagation(); toggleSlotStatus(${slot.id})">
                             ${slot.is_active ? '⏸️ Disable' : '▶️ Enable'}
                         </button>
-                        <button class="btn btn-small" style="color: #ef4444;" onclick="deleteSlot(${slot.id})">
+                        <button class="btn btn-small" style="color: #ef4444;" onclick="event.stopPropagation(); deleteSlot(${slot.id})">
                             🗑️ Delete
                         </button>
                     </div>
@@ -196,11 +211,12 @@ function triggerAutoDetect() {
     });
 }
 
-function scanHardwarePorts() {
+function scanHardwarePorts(cb) {
     $.get('/api/v1/system/ports', function (res) {
+        SYSTEM_PORTS = res.ports || [];
         const select = $('#slot-port');
         select.empty();
-        const ports = res.ports || [];
+        const ports = SYSTEM_PORTS;
         if (ports.length === 0) {
             select.append('<option value="COM19">COM19 (Default)</option>');
             select.append('<option value="COM20">COM20</option>');
@@ -217,6 +233,9 @@ function scanHardwarePorts() {
                 }
             });
         }
+        if (typeof cb === 'function') cb(SYSTEM_PORTS);
+    }).fail(function () {
+        if (typeof cb === 'function') cb([]);
     });
 }
 
@@ -508,3 +527,331 @@ function escapeHtml(text) {
     if (!text) return '';
     return $('<div>').text(text).html();
 }
+
+function editSimNumber(slotId, currentNumber) {
+    const newNum = prompt("Enter or assign the SIM phone number for this COM port (e.g. 09171234567):", currentNumber || '');
+    if (newNum === null) return;
+    $.ajax({
+        url: `/api/v1/gateways/${slotId}/sim`,
+        type: 'POST',
+        contentType: 'application/json',
+        data: JSON.stringify({ sim_number: newNum.trim() }),
+        success: function() {
+            loadGatewaySlots();
+        },
+        error: function(err) {
+            alert('Failed to save SIM number: ' + (err.responseJSON ? err.responseJSON.error : 'Network error'));
+        }
+    });
+}
+
+function scanSlotSim(slotId, btnEl) {
+    const $btn = $(btnEl);
+    const orig = $btn.text();
+    $btn.text('⏳');
+    $.get(`/api/v1/gateways/${slotId}/sim`, function(resp) {
+        if (resp && resp.sim_info && resp.sim_info.error) {
+            alert(`Query result for slot:\nStatus: ${resp.sim_info.cpin}\nError: ${resp.sim_info.error}`);
+        }
+        loadGatewaySlots();
+    }).always(function() {
+        $btn.text(orig);
+    });
+}
+
+function triggerDetectSims() {
+    const btn = $('#btn-detect-sims');
+    const orig = btn.html();
+    btn.prop('disabled', true).html('<span>⏳</span> Reading SIM Cards...');
+    $.post('/api/v1/gateways/sim-scan', function(resp) {
+        loadGatewaySlots();
+    }).always(function() {
+        btn.prop('disabled', false).html(orig);
+    });
+}
+
+// ==========================================================================
+// SLOT DETAILS, CONFIGURATION & LOGS MODAL
+// ==========================================================================
+let CURRENT_MODAL_SLOT_ID = null;
+
+function openSlotDetailsModal(slotId) {
+    try {
+        slotId = parseInt(slotId, 10);
+        CURRENT_MODAL_SLOT_ID = slotId;
+        const slot = (GATEWAY_SLOTS || []).find(s => s.id === slotId);
+        if (!slot) {
+            console.warn('Slot not found for id:', slotId);
+            return;
+        }
+
+        // Header info
+        $('#modal-slot-title').text(`${slot.name || 'Modem Slot'} (${slot.port || '--'})`);
+        let badgeClass = 'status-online';
+        let badgeText = '🟢 Online';
+        if (!slot.is_active) {
+            badgeClass = 'status-disabled';
+            badgeText = '⚪ Inactive';
+        } else if (slot.is_mock) {
+            badgeClass = 'status-mock';
+            badgeText = '🟡 Mock Mode';
+        }
+        $('#modal-slot-badge').attr('class', `slot-status-pill ${badgeClass}`).text(badgeText);
+
+        // Form inputs
+        $('#cfg-slot-id').val(slot.id);
+        $('#cfg-slot-name').val(slot.name || '');
+        $('#cfg-slot-sim').val(slot.sim_number || '');
+        $('#cfg-slot-baud').val(slot.baudrate || 115200);
+        $('#cfg-slot-operator').val(slot.sim_operator || 'Auto');
+        $('#cfg-slot-prefixes').val(slot.prefix_filter || '');
+        $('#cfg-slot-active').prop('checked', !!slot.is_active);
+
+        $('#cfg-slot-iccid').text(slot.iccid || 'Not Detected / Reading...');
+        $('#cfg-slot-imsi').text(slot.imsi || 'Not Detected / Reading...');
+        const csq = slot.signal_csq || 0;
+        $('#cfg-slot-csq').text(csq > 0 ? `${csq}/31 (Good)` : 'No Signal / MOCK');
+
+        try {
+            populateConfigPortDropdown(slot.port);
+        } catch (e) {
+            console.warn('Error in populateConfigPortDropdown:', e);
+        }
+
+        switchModalTab('modtab-settings');
+        loadCurrentSlotLogs();
+
+        $('#slot-details-modal').css('display', 'flex');
+    } catch (err) {
+        console.error('Error opening slot details modal:', err);
+        $('#slot-details-modal').css('display', 'flex');
+    }
+}
+
+function closeSlotDetailsModal() {
+    $('#slot-details-modal').hide();
+    CURRENT_MODAL_SLOT_ID = null;
+}
+
+function switchModalTab(tabId) {
+    $('.modal-tab-btn').removeClass('active');
+    $(`.modal-tab-btn[data-modaltab="${tabId}"]`).addClass('active');
+
+    $('.modal-tab-pane').removeClass('active');
+    $('#' + tabId).addClass('active');
+
+    if (tabId === 'modtab-settings') {
+        $('#btn-save-slot-cfg').show();
+    } else {
+        $('#btn-save-slot-cfg').hide();
+    }
+
+    if (tabId === 'modtab-sent' || tabId === 'modtab-received') {
+        loadCurrentSlotLogs();
+    }
+}
+
+function populateConfigPortDropdown(selectedPort) {
+    const $select = $('#cfg-slot-port');
+    $select.empty();
+    const ports = (typeof SYSTEM_PORTS !== 'undefined' && Array.isArray(SYSTEM_PORTS) && SYSTEM_PORTS.length > 0)
+        ? SYSTEM_PORTS
+        : ['COM1', 'COM19', 'COM20', 'COM21', 'COM22'];
+
+    ports.forEach(p => {
+        $select.append(`<option value="${p}">${p}</option>`);
+    });
+    if (selectedPort && !ports.includes(selectedPort)) {
+        $select.append(`<option value="${selectedPort}">${selectedPort}</option>`);
+    }
+    $select.val(selectedPort || ports[0]);
+}
+
+function scanHardwarePortsForConfig() {
+    scanHardwarePorts(function () {
+        populateConfigPortDropdown($('#cfg-slot-port').val());
+    });
+}
+
+function saveSlotConfiguration() {
+    const slotId = CURRENT_MODAL_SLOT_ID;
+    if (!slotId) return;
+
+    const name = $('#cfg-slot-name').val().trim();
+    const port = $('#cfg-slot-port').val();
+    const baudrate = parseInt($('#cfg-slot-baud').val(), 10);
+    const sim_operator = $('#cfg-slot-operator').val();
+    const sim_number = $('#cfg-slot-sim').val().trim();
+    const prefix_filter = $('#cfg-slot-prefixes').val().trim();
+    const is_active = $('#cfg-slot-active').is(':checked') ? 1 : 0;
+
+    if (!name || !port) {
+        alert('Slot Name and Port are required.');
+        return;
+    }
+
+    const $btn = $('#btn-save-slot-cfg');
+    const origText = $btn.text();
+    $btn.prop('disabled', true).text('Saving...');
+
+    $.ajax({
+        url: `/api/v1/gateways/${slotId}`,
+        type: 'POST',
+        contentType: 'application/json',
+        data: JSON.stringify({
+            name, port, baudrate, sim_operator, sim_number, prefix_filter, is_active
+        }),
+        success: function (res) {
+            alert('Configuration saved successfully!');
+            loadGatewaySlots();
+            $('#modal-slot-title').text(`${name} (${port})`);
+        },
+        error: function (xhr) {
+            alert('Error saving configuration: ' + (xhr.responseJSON?.error || xhr.statusText));
+        },
+        complete: function () {
+            $btn.prop('disabled', false).text(origText);
+        }
+    });
+}
+
+function loadCurrentSlotLogs() {
+    if (!CURRENT_MODAL_SLOT_ID) return;
+    $.get(`/api/v1/gateways/${CURRENT_MODAL_SLOT_ID}/logs`, function (res) {
+        if (!res.success) return;
+
+        // Sent Logs
+        const sentLogs = res.sent || [];
+        $('#modal-sent-count').text(sentLogs.length);
+        const $sentBody = $('#slot-sent-table-body');
+        $sentBody.empty();
+        if (sentLogs.length === 0) {
+            $sentBody.html('<tr><td colspan="5" class="empty-cell">No sent messages recorded yet for this slot.</td></tr>');
+        } else {
+            sentLogs.forEach(log => {
+                const isSent = (log.status || '').toUpperCase() === 'SENT';
+                const statusPill = isSent 
+                    ? '<span class="slot-status-pill status-online" style="padding:2px 8px;font-size:10px;">SENT</span>' 
+                    : '<span class="slot-status-pill status-disabled" style="padding:2px 8px;font-size:10px;color:#ef4444;">FAILED</span>';
+                $sentBody.append(`
+                    <tr>
+                        <td><strong>${escapeHtml(log.recipient)}</strong></td>
+                        <td style="max-width:260px;word-break:break-word;">${escapeHtml(log.message)}</td>
+                        <td>${statusPill}</td>
+                        <td><small>${escapeHtml(log.connector || 'DIRECT')}</small></td>
+                        <td><small>${escapeHtml(log.time || '--')}</small></td>
+                    </tr>
+                `);
+            });
+        }
+
+        // Received Logs
+        const recvLogs = res.received || [];
+        $('#modal-received-count').text(recvLogs.length);
+        const $recvBody = $('#slot-received-table-body');
+        $recvBody.empty();
+        if (recvLogs.length === 0) {
+            $recvBody.html('<tr><td colspan="4" class="empty-cell">No incoming messages received yet. Click "Read from SIM" to check.</td></tr>');
+        } else {
+            recvLogs.forEach(log => {
+                $recvBody.append(`
+                    <tr>
+                        <td><strong>${escapeHtml(log.sender)}</strong></td>
+                        <td style="max-width:300px;word-break:break-word;">${escapeHtml(log.message)}</td>
+                        <td><code>${escapeHtml(log.port)}</code></td>
+                        <td><small>${escapeHtml(log.time || '--')}</small></td>
+                    </tr>
+                `);
+            });
+        }
+    });
+}
+
+function checkSlotIncomingSms() {
+    if (!CURRENT_MODAL_SLOT_ID) return;
+    const $btn = $('#btn-check-inbox');
+    const orig = $btn.text();
+    $btn.prop('disabled', true).text('Reading SIM...');
+    $.post(`/api/v1/gateways/${CURRENT_MODAL_SLOT_ID}/check-inbox`, function (res) {
+        alert(`Checked SIM memory: ${res.new_messages_count || 0} incoming message(s) read.`);
+        loadCurrentSlotLogs();
+    }).fail(function (xhr) {
+        alert('Failed to read from SIM: ' + (xhr.responseJSON?.error || xhr.statusText));
+    }).always(function () {
+        $btn.prop('disabled', false).text(orig);
+    });
+}
+
+function sendTerminalCommand(cmd) {
+    $('#terminal-cmd-input').val(cmd);
+    submitTerminalInput();
+}
+
+function submitTerminalInput() {
+    if (!CURRENT_MODAL_SLOT_ID) return;
+    const cmd = $('#terminal-cmd-input').val().trim();
+    if (!cmd) return;
+
+    const $screen = $('#slot-terminal-screen');
+    $screen.append(`<div class="term-line cmd">&gt; ${escapeHtml(cmd)}</div>`);
+    $screen.scrollTop($screen[0].scrollHeight);
+
+    $.ajax({
+        url: `/api/v1/gateways/${CURRENT_MODAL_SLOT_ID}/at-command`,
+        type: 'POST',
+        contentType: 'application/json',
+        data: JSON.stringify({ command: cmd }),
+        success: function (res) {
+            const respText = res.response || '(No response)';
+            $screen.append(`<div class="term-line resp">${escapeHtml(respText)}</div>`);
+            $screen.scrollTop($screen[0].scrollHeight);
+        },
+        error: function (xhr) {
+            const err = xhr.responseJSON?.error || 'Execution failed';
+            $screen.append(`<div class="term-line error">❌ ${escapeHtml(err)}</div>`);
+            $screen.scrollTop($screen[0].scrollHeight);
+        }
+    });
+
+    $('#terminal-cmd-input').val('');
+}
+
+function clearTerminalScreen() {
+    $('#slot-terminal-screen').html('<div class="term-line info">=== AT COMMAND TERMINAL CLEARED ===</div>');
+}
+
+$(document).on('keypress', '#terminal-cmd-input', function (e) {
+    if (e.which === 13) {
+        e.preventDefault();
+        submitTerminalInput();
+    }
+});
+
+$(window).on('click', function (e) {
+    if ($(e.target).is('#slot-details-modal')) {
+        closeSlotDetailsModal();
+    }
+});
+
+// Delegated click handler for modem slot cards
+$(document).on('click', '.clickable-slot-card', function (e) {
+    if ($(e.target).closest('button, input, select, textarea').length) return;
+    const slotId = $(this).data('slot-id');
+    if (slotId) {
+        openSlotDetailsModal(slotId);
+    }
+});
+
+// Explicit global exports for inline onclick attributes
+window.openSlotDetailsModal = openSlotDetailsModal;
+window.closeSlotDetailsModal = closeSlotDetailsModal;
+window.switchModalTab = switchModalTab;
+window.saveSlotConfiguration = saveSlotConfiguration;
+window.loadCurrentSlotLogs = loadCurrentSlotLogs;
+window.checkSlotIncomingSms = checkSlotIncomingSms;
+window.sendTerminalCommand = sendTerminalCommand;
+window.submitTerminalInput = submitTerminalInput;
+window.clearTerminalScreen = clearTerminalScreen;
+window.scanHardwarePortsForConfig = scanHardwarePortsForConfig;
+
+

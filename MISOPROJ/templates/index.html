@@ -5,9 +5,9 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>OpenSMS Gateway & Messenger</title>
-    <link rel="stylesheet" href="/static/styles.css">
+    <link rel="stylesheet" href="/static/styles.css?v=2.1">
     <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
-    <script src="/static/script.js" defer></script>
+    <script src="/static/script.js?v=2.1" defer></script>
 </head>
 
 <body>
@@ -57,7 +57,10 @@
                         <h2>GSM Modem Slots (Gateways)</h2>
                         <p class="pane-subtitle">Manage multi-slot GSM modem pool, prefix routing, and hardware serial ports.</p>
                     </div>
-                    <div style="display: flex; gap: 10px;">
+                    <div style="display: flex; gap: 10px; flex-wrap: wrap;">
+                        <button class="btn btn-secondary" id="btn-detect-sims" onclick="triggerDetectSims()">
+                            <span>🔍</span> Detect SIMs
+                        </button>
                         <button class="btn btn-secondary" id="btn-auto-detect" onclick="triggerAutoDetect()">
                             <span>⚡</span> Auto-Detect Hardware
                         </button>
@@ -310,6 +313,173 @@ Inbox Table:  `inbox` (`id`, `sender`, `message`, `received_at`)</code></pre>
             <div class="modal-footer">
                 <button class="btn btn-secondary" onclick="closeAddSlotModal()">Cancel</button>
                 <button class="btn btn-primary" onclick="saveNewSlot()">Save Slot</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- MODAL: CONFIGURE & INSPECT MODEM SLOT -->
+    <div class="modal" id="slot-details-modal">
+        <div class="modal-content modal-large">
+            <div class="modal-header">
+                <div class="slot-modal-title">
+                    <h3 id="modal-slot-title">Slot Details</h3>
+                    <span id="modal-slot-badge" class="slot-status-pill status-online">🟢 Online</span>
+                </div>
+                <span class="close-modal" onclick="closeSlotDetailsModal()">&times;</span>
+            </div>
+            
+            <div class="modal-tab-nav">
+                <button class="modal-tab-btn active" data-modaltab="modtab-settings" onclick="switchModalTab('modtab-settings')">⚙️ Settings</button>
+                <button class="modal-tab-btn" data-modaltab="modtab-sent" onclick="switchModalTab('modtab-sent')">📤 Send Log (<span id="modal-sent-count">0</span>)</button>
+                <button class="modal-tab-btn" data-modaltab="modtab-received" onclick="switchModalTab('modtab-received')">📥 Receive Log (<span id="modal-received-count">0</span>)</button>
+                <button class="modal-tab-btn" data-modaltab="modtab-terminal" onclick="switchModalTab('modtab-terminal')">💻 AT Terminal</button>
+            </div>
+
+            <div class="modal-body">
+                <!-- TAB 1: SETTINGS -->
+                <div class="modal-tab-pane active" id="modtab-settings">
+                    <input type="hidden" id="cfg-slot-id">
+                    <div class="form-row-2">
+                        <div class="form-group">
+                            <label>Slot Label / Name</label>
+                            <input type="text" id="cfg-slot-name" class="input-field" placeholder="e.g. Slot 1 (Globe)" readonly>
+                        </div>
+                        <div class="form-group">
+                            <label>SIM Phone Number (MSISDN)</label>
+                            <input type="text" id="cfg-slot-sim" class="input-field" placeholder="e.g. 09171234567" readonly>
+                        </div>
+                    </div>
+
+                    <div class="form-row-2">
+                        <div class="form-group">
+                            <label>Hardware COM Port</label>
+                            <div class="port-select-row">
+                                <select id="cfg-slot-port" class="input-field" disabled></select>
+                                <button type="button" class="btn btn-small" onclick="scanHardwarePortsForConfig()" disabled>Scan</button>
+                            </div>
+                        </div>
+                        <div class="form-group">
+                            <label>Baud Rate</label>
+                            <select id="cfg-slot-baud" class="input-field" disabled>
+                                <option value="115200">115200 (Standard LTE/GSM)</option>
+                                <option value="9600">9600 (Legacy Wavecom/Siemens)</option>
+                                <option value="57600">57600</option>
+                                <option value="38400">38400</option>
+                                <option value="19200">19200</option>
+                            </select>
+                        </div>
+                    </div>
+
+                    <div class="form-row-2">
+                        <div class="form-group">
+                            <label>Carrier / Operator</label>
+                            <select id="cfg-slot-operator" class="input-field" disabled>
+                                <option value="Auto">Auto Detect</option>
+                                <option value="Globe">Globe / TM</option>
+                                <option value="Smart">Smart / TNT</option>
+                                <option value="DITO">DITO</option>
+                                <option value="Sun">Sun Cellular</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label>Active Status</label>
+                            <div style="padding-top: 10px;">
+                                <label style="display: flex; align-items: center; gap: 8px; cursor: pointer; font-weight: normal; opacity: 0.7;">
+                                    <input type="checkbox" id="cfg-slot-active" style="width: 18px; height: 18px;" disabled>
+                                    Enable this slot for message dispatching
+                                </label>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="form-group">
+                        <label>Cellular Prefix Filter</label>
+                        <input type="text" id="cfg-slot-prefixes" class="input-field" placeholder="e.g. 0917,0927,0915,0916" readonly>
+                        <small class="form-hint">Comma-separated mobile prefixes automatically routed through this slot.</small>
+                    </div>
+
+                    <div class="hardware-meta-box">
+                        <div class="meta-row"><span>💳 ICCID:</span> <code id="cfg-slot-iccid">Reading...</code></div>
+                        <div class="meta-row"><span>🆔 IMSI:</span> <code id="cfg-slot-imsi">Reading...</code></div>
+                        <div class="meta-row"><span>📶 Signal Strength:</span> <strong id="cfg-slot-csq">--</strong></div>
+                    </div>
+                </div>
+
+                <!-- TAB 2: SEND LOG (OUTBOX) -->
+                <div class="modal-tab-pane" id="modtab-sent">
+                    <div class="log-pane-toolbar">
+                        <span class="log-info-label">Sent messages dispatched via this modem slot</span>
+                        <button class="btn btn-small" onclick="loadCurrentSlotLogs()">🔄 Refresh</button>
+                    </div>
+                    <div class="table-container modal-table-box">
+                        <table class="data-table">
+                            <thead>
+                                <tr>
+                                    <th>Recipient</th>
+                                    <th>Message</th>
+                                    <th>Status</th>
+                                    <th>Source</th>
+                                    <th>Time</th>
+                                </tr>
+                            </thead>
+                            <tbody id="slot-sent-table-body">
+                                <tr><td colspan="5" class="empty-cell">No sent messages recorded yet.</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <!-- TAB 3: RECEIVE LOG (INBOX) -->
+                <div class="modal-tab-pane" id="modtab-received">
+                    <div class="log-pane-toolbar">
+                        <span class="log-info-label">Incoming messages received on this SIM / COM port</span>
+                        <div style="display: flex; gap: 8px;">
+                            <button class="btn btn-small btn-primary" id="btn-check-inbox" onclick="checkSlotIncomingSms()">📩 Read from SIM</button>
+                            <button class="btn btn-small" onclick="loadCurrentSlotLogs()">🔄 Refresh</button>
+                        </div>
+                    </div>
+                    <div class="table-container modal-table-box">
+                        <table class="data-table">
+                            <thead>
+                                <tr>
+                                    <th>Sender</th>
+                                    <th>Message</th>
+                                    <th>Port</th>
+                                    <th>Received At</th>
+                                </tr>
+                            </thead>
+                            <tbody id="slot-received-table-body">
+                                <tr><td colspan="4" class="empty-cell">No received messages yet. Click "Read from SIM" to check incoming SMS.</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <!-- TAB 4: AT TERMINAL -->
+                <div class="modal-tab-pane" id="modtab-terminal">
+                    <div class="terminal-quick-bar">
+                        <span>Quick Commands:</span>
+                        <button type="button" class="btn-terminal-cmd" onclick="sendTerminalCommand('AT')">AT</button>
+                        <button type="button" class="btn-terminal-cmd" onclick="sendTerminalCommand('AT+CSQ')">AT+CSQ (Signal)</button>
+                        <button type="button" class="btn-terminal-cmd" onclick="sendTerminalCommand('AT+CPIN?')">AT+CPIN? (SIM)</button>
+                        <button type="button" class="btn-terminal-cmd" onclick="sendTerminalCommand('AT+COPS?')">AT+COPS? (Network)</button>
+                        <button type="button" class="btn-terminal-cmd" onclick="sendTerminalCommand('AT+CCID')">AT+CCID (Serial)</button>
+                        <button type="button" class="btn-terminal-cmd" onclick="sendTerminalCommand('ATI')">ATI (Model)</button>
+                    </div>
+                    <div class="terminal-screen" id="slot-terminal-screen">
+                        <div class="term-line info">=== AT COMMAND TERMINAL ===</div>
+                        <div class="term-line info">Click a command above or type below to send directly to this modem port.</div>
+                    </div>
+                    <div class="terminal-input-row">
+                        <input type="text" id="terminal-cmd-input" class="input-field terminal-input" placeholder="Type AT command (e.g. AT+CSQ) and press Enter...">
+                        <button type="button" class="btn btn-primary" onclick="submitTerminalInput()">Send</button>
+                        <button type="button" class="btn btn-secondary" onclick="clearTerminalScreen()">Clear</button>
+                    </div>
+                </div>
+            </div>
+
+            <div class="modal-footer" id="slot-modal-footer">
+                <button class="btn btn-secondary" onclick="closeSlotDetailsModal()">Close</button>
             </div>
         </div>
     </div>
