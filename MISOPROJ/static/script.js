@@ -68,11 +68,54 @@ function loadGatewaySlots() {
         GATEWAY_SLOTS = slots || [];
         renderSlotsGrid(GATEWAY_SLOTS);
         updateQuickSendSlotDropdown(GATEWAY_SLOTS);
+        renderConnectors(GATEWAY_SLOTS);
         
         const activeCount = GATEWAY_SLOTS.filter(s => s.is_active).length;
         $('#active-slots-count').text(activeCount);
     }).fail(function () {
         console.warn('Failed to load gateway slots');
+    });
+}
+
+function renderConnectors(slots) {
+    const grid = $('#dynamic-connectors-grid');
+    if (!slots || slots.length === 0) {
+        grid.html('<div class="empty-cell" style="grid-column: 1/-1;">No modem slots configured. Connectors unavailable.</div>');
+        return;
+    }
+    
+    grid.empty();
+    slots.forEach(slot => {
+        const apiKey = slot.api_key || 'No Key Generated';
+        const occupiedText = slot.occupied_by ? `OCCUPIED BY: ${slot.occupied_by}` : 'AVAILABLE';
+        const occupiedClass = slot.occupied_by ? 'pill-red' : 'pill-green';
+        
+        const card = `
+            <div class="connector-card">
+                <div class="card-top">
+                    <div class="connector-badge rest-badge">${escapeHtml(slot.name)}</div>
+                    <span class="pill ${occupiedClass}">${escapeHtml(occupiedText)}</span>
+                </div>
+                <h3>API Key: <code style="font-size: 0.9em; background: #e2e8f0; padding: 2px 6px; border-radius: 4px;">${escapeHtml(apiKey)}</code></h3>
+                <p class="card-desc">Exclusive API Key for hardware port <strong>${escapeHtml(slot.port)}</strong>. Use this to bind an external system and strictly route messages through this slot.</p>
+                
+                <div class="code-box">
+                    <span class="code-label">cURL Occupy Request (Claim this slot):</span>
+                    <code>curl -X POST http://localhost:8080/api/v1/gateways/${slot.id}/occupy \\
+  -H "Content-Type: application/json" \\
+  -d '{"system_name": "My System", "api_key": "${escapeHtml(apiKey)}"}'</code>
+                </div>
+
+                <div class="config-instructions">
+                    <h4>Send SMS via this strictly occupied slot:</h4>
+                    <pre><code>curl -X POST http://localhost:8080/api/v1/sms/send \\
+  -H "X-API-Key: ${escapeHtml(apiKey)}" \\
+  -H "Content-Type: application/json" \\
+  -d '{"to": "09123456789", "message": "Notice from ERP"}'</code></pre>
+                </div>
+            </div>
+        `;
+        grid.append(card);
     });
 }
 
@@ -606,6 +649,9 @@ function openSlotDetailsModal(slotId) {
         $('#cfg-slot-operator').val(slot.sim_operator || 'Auto');
         $('#cfg-slot-prefixes').val(slot.prefix_filter || '');
         $('#cfg-slot-active').prop('checked', !!slot.is_active);
+        
+        $('#cfg-slot-api-key').val(slot.api_key || 'No Key Generated');
+        $('#cfg-slot-occupied-by').val(slot.occupied_by || '');
 
         $('#cfg-slot-iccid').text(slot.iccid || 'Not Detected / Reading...');
         $('#cfg-slot-imsi').text(slot.imsi || 'Not Detected / Reading...');

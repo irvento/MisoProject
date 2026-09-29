@@ -5,7 +5,7 @@ import serial
 import serial.tools.list_ports
 import pymysql
 import atexit
-from flask import Flask, request, jsonify, render_template
+from flask import Flask, request, jsonify, render_template, session, redirect, url_for
 from flask_cors import CORS
 import datetime
 import threading
@@ -21,6 +21,7 @@ if sys.platform == "win32":
 
 # Initialize Flask app
 app = Flask(__name__, static_folder='static', template_folder='templates')
+app.secret_key = 'super_secret_miso_key_123!'
 CORS(app, resources={r"/*": {"origins": "*"}})
 
 # MySQL Database Configuration
@@ -106,6 +107,15 @@ def init_db():
                 cursor.execute("ALTER TABLE gateways ADD COLUMN iccid VARCHAR(50) NULL AFTER sim_number")
             if 'imsi' not in gw_cols:
                 cursor.execute("ALTER TABLE gateways ADD COLUMN imsi VARCHAR(50) NULL AFTER iccid")
+            if 'api_key' not in gw_cols:
+                cursor.execute("ALTER TABLE gateways ADD COLUMN api_key VARCHAR(100) NULL AFTER imsi")
+                import uuid
+                cursor.execute("SELECT id FROM gateways WHERE api_key IS NULL")
+                for (gid,) in cursor.fetchall():
+                    k = "sk-" + str(uuid.uuid4()).replace("-", "")[:24]
+                    cursor.execute("UPDATE gateways SET api_key=%s WHERE id=%s", (k, gid))
+            if 'occupied_by' not in gw_cols:
+                cursor.execute("ALTER TABLE gateways ADD COLUMN occupied_by VARCHAR(100) NULL AFTER api_key")
             
             # Connector registration table
             cursor.execute("""
@@ -180,7 +190,7 @@ init_db()
 
 class ModemSlot:
     """Represents a single physical or virtual slot on the GSM modem pool"""
-    def __init__(self, slot_id, name, port_name, baudrate=115200, sim_operator='Auto', prefix_filter='', sim_number=None, iccid=None, imsi=None):
+    def __init__(self, slot_id, name, port_name, baudrate=115200, sim_operator='Auto', prefix_filter='', sim_number=None, iccid=None, imsi=None, api_key=None, occupied_by=None):
         self.id = slot_id
         self.name = name
         self.port_name = port_name
@@ -190,6 +200,8 @@ class ModemSlot:
         self.sim_number = sim_number
         self.iccid = iccid
         self.imsi = imsi
+        self.api_key = api_key
+        self.occupied_by = occupied_by
         self.ser = None
         self.is_mock = False
         self.status = "INITIALIZING"
@@ -204,7 +216,7 @@ class ModemSlot:
     def open_port(self):
         with self.lock:
             try:
-                self.ser = serial.Serial(self.port_name, baudrate=self.baudrate, timeout=2)
+                self.ser = serial.Serial(self.port_name, baudrate=self.baudrate, timeout=2, write_timeout=2)
                 self.is_mock = False
                 self.status = "ONLINE"
                 self.last_error = None
@@ -469,6 +481,8 @@ class ModemSlot:
             "sim_number": self.sim_number,
             "iccid": self.iccid,
             "imsi": self.imsi,
+            "api_key": self.api_key,
+            "occupied_by": self.occupied_by,
             "prefix_filter": ",".join(self.prefix_filter),
             "is_active": self.is_active,
             "signal_csq": self.signal_csq,
@@ -494,7 +508,7 @@ class GatewayManager:
                 return
             try:
                 with conn.cursor() as cur:
-                    cur.execute("SELECT id, name, port, baudrate, sim_operator, prefix_filter, is_active, sent_count, failed_count, sim_number, iccid, imsi FROM gateways")
+                    cur.execute("SELECT id, name, port, baudrate, sim_operator, prefix_filter, is_active, sent_count, failed_count, sim_number, iccid, imsi, api_key, occupied_by FROM gateways")
                     rows = cur.fetchall()
                 
                 existing_ids = set()
@@ -502,7 +516,7 @@ class GatewayManager:
                     slot_id = r[0]
                     existing_ids.add(slot_id)
                     if slot_id not in self.slots:
-                        slot = ModemSlot(slot_id, r[1], r[2], r[3], r[4], r[5] or "", sim_number=r[9], iccid=r[10], imsi=r[11])
+                        slot = ModemSlot(slot_id, r[1], r[2], r[3], r[4], r[5] or "", sim_number=r[9], iccid=r[10], imsi=r[11], api_key=r[12], occupied_by=r[13])
                         slot.is_active = bool(r[6])
                         slot.sent_count = r[7] or 0
                         slot.failed_count = r[8] or 0
@@ -515,6 +529,8 @@ class GatewayManager:
                         self.slots[slot_id].sim_number = r[9]
                         self.slots[slot_id].iccid = r[10]
                         self.slots[slot_id].imsi = r[11]
+                        self.slots[slot_id].api_key = r[12]
+                        self.slots[slot_id].occupied_by = r[13]
 
                 # Clean up removed slots
                 for sid in list(self.slots.keys()):
@@ -816,7 +832,26 @@ def get_department_logs(department):
 
 @app.route('/')
 def home():
+    if not session.get('logged_in'):
+        return redirect(url_for('login'))
     return render_template('index.html')
+
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    if request.method == 'POST':
+        email = request.form.get('email')
+        password = request.form.get('password')
+        if email == 'pexdev@email.com' and password == 'pexdev@email.com':
+            session['logged_in'] = True
+            return redirect(url_for('home'))
+        else:
+            return render_template('login.html', error="Invalid email or password.")
+    return render_template('login.html')
+
+@app.route('/logout')
+def logout():
+    session.pop('logged_in', None)
+    return redirect(url_for('login'))
 
 # ------------------------------------------------------------------------------
 # CONNECTOR 1: DIAFAAN-COMPATIBLE HTTP WEB CONNECTOR
@@ -846,22 +881,34 @@ def diafaan_connector_endpoint():
 @app.route('/send-sms', methods=['POST'])
 @app.route('/api/send', methods=['POST'])
 def send_message_rest():
-    expected_api_key = os.environ.get('GATEWAY_API_KEY')
-    if expected_api_key:
-        auth_header = request.headers.get('Authorization')
-        api_key_header = request.headers.get('X-API-Key')
-        provided_key = api_key_header
-        if not provided_key and auth_header and auth_header.startswith('Bearer '):
-            provided_key = auth_header.split(' ')[1]
-        
-        if provided_key != expected_api_key:
-            return jsonify({"success": False, "error": "Unauthorized: Invalid or missing API Key"}), 401
-
     data = request.get_json(silent=True) or {}
     target = data.get('target') or data.get('phone_number') or data.get('to')
     message = data.get('message')
     preferred_gw = data.get('gateway')
     type_ = data.get('type', 'individual')
+
+    auth_header = request.headers.get('Authorization')
+    api_key_header = request.headers.get('X-API-Key')
+    provided_key = api_key_header
+    if not provided_key and auth_header and auth_header.startswith('Bearer '):
+        provided_key = auth_header.split(' ')[1]
+
+    # Check Slot-specific API Key first
+    matched_slot_by_key = None
+    if provided_key:
+        with gateway_manager.lock:
+            for s in gateway_manager.slots.values():
+                if s.api_key == provided_key:
+                    matched_slot_by_key = s
+                    break
+    
+    if matched_slot_by_key:
+        preferred_gw = str(matched_slot_by_key.id)
+    else:
+        # Fallback to Global API Key
+        expected_api_key = os.environ.get('GATEWAY_API_KEY')
+        if expected_api_key and provided_key != expected_api_key:
+            return jsonify({"success": False, "error": "Unauthorized: Invalid or missing API Key"}), 401
 
     if not target or not message:
         return jsonify({"success": False, "error": "Missing target phone number or message content"}), 400
@@ -1113,6 +1160,37 @@ def gateway_check_inbox_api(gw_id):
         return jsonify({"success": False, "error": "Gateway not found"}), 404
     msgs = slot.check_incoming_sms()
     return jsonify({"success": True, "new_messages_count": len(msgs), "messages": msgs})
+
+@app.route('/api/v1/gateways/<int:gw_id>/occupy', methods=['POST'])
+def gateway_occupy_api(gw_id):
+    slot = gateway_manager.slots.get(gw_id)
+    if not slot:
+        return jsonify({"success": False, "error": "Gateway not found"}), 404
+        
+    data = request.get_json(silent=True) or {}
+    system_name = data.get('system_name')
+    provided_key = data.get('api_key') or request.headers.get('X-API-Key')
+    
+    if not system_name:
+        return jsonify({"success": False, "error": "Missing system_name"}), 400
+        
+    if not provided_key or provided_key != slot.api_key:
+        return jsonify({"success": False, "error": "Unauthorized: Invalid slot API key"}), 401
+        
+    if slot.occupied_by and slot.occupied_by != system_name:
+        return jsonify({"success": False, "error": f"Slot already occupied by {slot.occupied_by}"}), 409
+        
+    slot.occupied_by = system_name
+    try:
+        conn = get_db_connection()
+        if conn:
+            with conn.cursor() as cur:
+                cur.execute("UPDATE gateways SET occupied_by=%s WHERE id=%s", (system_name, gw_id))
+            conn.close()
+    except Exception as e:
+        print("Error updating occupancy:", e)
+        
+    return jsonify({"success": True, "message": f"Slot successfully occupied by {system_name}"})
 
 @app.route('/api/v1/gateways/<int:gw_id>/toggle', methods=['POST'])
 def toggle_gateway_api(gw_id):
@@ -1429,4 +1507,4 @@ if __name__ == '__main__':
     print(f" 🔌 REST API:         http://localhost:{port_to_use}/api/v1/sms/send")
     print("="*60 + "\n")
 
-    app.run(host='0.0.0.0', port=port_to_use, debug=True)
+    app.run(host='0.0.0.0', port=port_to_use, debug=False)
