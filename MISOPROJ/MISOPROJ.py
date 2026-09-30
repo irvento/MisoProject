@@ -5,11 +5,22 @@ import serial
 import serial.tools.list_ports
 import pymysql
 import atexit
+import re
+import functools
 from flask import Flask, request, jsonify, render_template, session, redirect, url_for
 from flask_cors import CORS
+from werkzeug.security import check_password_hash, generate_password_hash
 import datetime
 import threading
 import socket
+import dotenv
+
+# Load environment variables from .env
+dotenv_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '.env')
+if os.path.exists(dotenv_path):
+    dotenv.load_dotenv(dotenv_path)
+else:
+    dotenv.load_dotenv()
 
 # Ensure console output uses UTF-8 on Windows
 if sys.platform == "win32":
@@ -21,17 +32,83 @@ if sys.platform == "win32":
 
 # Initialize Flask app
 app = Flask(__name__, static_folder='static', template_folder='templates')
-app.secret_key = 'super_secret_miso_key_123!'
-CORS(app, resources={r"/*": {"origins": "*"}})
+app.secret_key = os.environ.get('FLASK_SECRET_KEY', 'fb6c27f8d1ac1eadc8c2f8ed110f1e342e3f6be99937dd52cceb3c38e8368c72')
+
+# Hardened Session Cookie Settings
+app.config.update(
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE='Lax',
+    PERMANENT_SESSION_LIFETIME=datetime.timedelta(hours=8)
+)
+
+# CORS Policy: Restrict to allowed origins
+allowed_origins_raw = os.environ.get('ALLOWED_ORIGINS', 'http://localhost:8080,http://127.0.0.1:8080,http://localhost:8000,http://127.0.0.1:8000')
+allowed_origins = [o.strip() for o in allowed_origins_raw.split(',') if o.strip()]
+CORS(app, resources={r"/*": {"origins": allowed_origins}}, supports_credentials=True)
+
+# Modern Security HTTP Headers Middleware
+@app.after_request
+def add_security_headers(response):
+    response.headers['X-Content-Type-Options'] = 'nosniff'
+    response.headers['X-Frame-Options'] = 'SAMEORIGIN'
+    response.headers['X-XSS-Protection'] = '1; mode=block'
+    response.headers['Referrer-Policy'] = 'strict-origin-when-cross-origin'
+    return response
 
 # MySQL Database Configuration
 DB_CONFIG = {
-    "host": "127.0.0.1",
-    "user": "root",
-    "password": "",
-    "database": "sms_system",
-    "port": 3306
+    "host": os.environ.get("DB_HOST", "127.0.0.1"),
+    "user": os.environ.get("DB_USER", "root"),
+    "password": os.environ.get("DB_PASSWORD", ""),
+    "database": os.environ.get("DB_NAME", "sms_system"),
+    "port": int(os.environ.get("DB_PORT", 3306))
 }
+
+# Brute-force Login Protection Tracker
+FAILED_LOGINS = {} # {ip: {"count": int, "blocked_until": float}}
+
+def is_ip_rate_limited(ip):
+    rec = FAILED_LOGINS.get(ip)
+    if not rec:
+        return False
+    now = time.time()
+    if rec.get("blocked_until", 0) > now:
+        return True
+    if rec.get("blocked_until", 0) <= now and rec.get("blocked_until", 0) > 0:
+        FAILED_LOGINS.pop(ip, None)
+    return False
+
+def record_login_attempt(ip, success):
+    now = time.time()
+    if success:
+        FAILED_LOGINS.pop(ip, None)
+        return
+    rec = FAILED_LOGINS.setdefault(ip, {"count": 0, "blocked_until": 0})
+    rec["count"] += 1
+    if rec["count"] >= 5:
+        rec["blocked_until"] = now + 900 # 15-minute lock
+
+def is_admin_authenticated():
+    """Checks if the request is authenticated via web session or master API key"""
+    if session.get('logged_in'):
+        return True
+    master_key = os.environ.get('GATEWAY_MASTER_KEY')
+    auth_header = request.headers.get('Authorization')
+    token = request.headers.get('X-Master-Key')
+    if not token and auth_header and auth_header.startswith('Bearer '):
+        token = auth_header.split(' ')[1]
+    if master_key and token and token == master_key:
+        return True
+    return False
+
+def admin_required(f):
+    @functools.wraps(f)
+    def decorated(*args, **kwargs):
+        if not is_admin_authenticated():
+            return jsonify({"success": False, "error": "Unauthorized: Admin authentication or Master Key required"}), 401
+        return f(*args, **kwargs)
+    return decorated
+
 
 def get_db_connection():
     try:
@@ -471,7 +548,12 @@ class ModemSlot:
         except Exception:
             pass
 
-    def to_dict(self):
+    def to_dict(self, include_sensitive=False):
+        if include_sensitive:
+            displayed_key = self.api_key
+        else:
+            displayed_key = (self.api_key[:7] + "..." + self.api_key[-4:]) if (self.api_key and len(self.api_key) > 12) else "********"
+
         return {
             "id": self.id,
             "name": self.name,
@@ -481,7 +563,7 @@ class ModemSlot:
             "sim_number": self.sim_number,
             "iccid": self.iccid,
             "imsi": self.imsi,
-            "api_key": self.api_key,
+            "api_key": displayed_key,
             "occupied_by": self.occupied_by,
             "prefix_filter": ",".join(self.prefix_filter),
             "is_active": self.is_active,
@@ -839,12 +921,30 @@ def home():
 @app.route('/login', methods=['GET', 'POST'])
 def login():
     if request.method == 'POST':
-        email = request.form.get('email')
-        password = request.form.get('password')
-        if email == 'pexdev@email.com' and password == 'pexdev@email.com':
+        client_ip = request.remote_addr or '127.0.0.1'
+        if is_ip_rate_limited(client_ip):
+            return render_template('login.html', error="Too many failed attempts. Login locked for 15 minutes.")
+
+        email = (request.form.get('email') or '').strip()
+        password = (request.form.get('password') or '').strip()
+
+        admin_email = os.environ.get('ADMIN_EMAIL', 'pexdev@email.com')
+        admin_hash = os.environ.get('ADMIN_PASSWORD_HASH')
+
+        is_valid = False
+        if email == admin_email:
+            if admin_hash:
+                is_valid = check_password_hash(admin_hash, password)
+            elif password == 'pexdev@email.com':
+                is_valid = True
+
+        if is_valid:
+            record_login_attempt(client_ip, success=True)
             session['logged_in'] = True
+            session.permanent = True
             return redirect(url_for('home'))
         else:
+            record_login_attempt(client_ip, success=False)
             return render_template('login.html', error="Invalid email or password.")
     return render_template('login.html')
 
@@ -855,7 +955,7 @@ def logout():
 
 # ------------------------------------------------------------------------------
 # CONNECTOR 1: DIAFAAN-COMPATIBLE HTTP WEB CONNECTOR
-# Exactly matches Diafaan URL format expected by Laravel sendsms and external apps
+# Authenticated via query param/header (password, token, or API key)
 # ------------------------------------------------------------------------------
 @app.route('/http/send-message/', methods=['GET', 'POST'])
 def diafaan_connector_endpoint():
@@ -864,18 +964,51 @@ def diafaan_connector_endpoint():
     msg = request.args.get('message') or request.form.get('message') or data.get('message')
     gw = request.args.get('gateway') or request.form.get('gateway') or data.get('gateway')
 
+    # Security check: require password, token, or API key matching slot or master key
+    provided_key = (request.args.get('password') or request.form.get('password') or 
+                    request.args.get('token') or request.args.get('api_key') or 
+                    request.headers.get('X-API-Key') or request.headers.get('X-Master-Key'))
+    auth_header = request.headers.get('Authorization')
+    if not provided_key and auth_header and auth_header.startswith('Bearer '):
+        provided_key = auth_header.split(' ')[1]
+
+    master_key = os.environ.get('GATEWAY_MASTER_KEY')
+    matched_slot = None
+    if provided_key:
+        with gateway_manager.lock:
+            for s in gateway_manager.slots.values():
+                if s.api_key == provided_key:
+                    matched_slot = s
+                    break
+
+    is_authorized = bool(matched_slot or (master_key and provided_key == master_key) or session.get('logged_in'))
+    if not is_authorized:
+        return "Unauthorized: Valid API key or token required", 401
+
+    if matched_slot:
+        gw = str(matched_slot.id)
+
     if not to or not msg:
         return "Error: Missing 'to' or 'message' parameter", 400
 
-    success, slot_name = gateway_manager.send_sms(to, msg, preferred_gateway=gw, connector_source="HTTP_Diafaan")
+    clean_to = re.sub(r'[\s\-\(\)]', '', str(to))
+    if not re.match(r'^\+?[0-9]{7,15}$', clean_to):
+        return "Error: Invalid phone number format", 400
+
+    clean_msg = str(msg).replace('\x00', '').replace('\x1a', '').replace('\x1b', '').strip()
+    if not clean_msg:
+        return "Error: Message body cannot be empty", 400
+
+    success, slot_name = gateway_manager.send_sms(clean_to, clean_msg, preferred_gateway=gw, connector_source="HTTP_Diafaan")
     
     if success:
-        return f"Message sent successfully to {to} via {slot_name}", 200
+        return f"Message sent successfully to {clean_to} via {slot_name}", 200
     else:
-        return f"Failed to deliver message to {to} ({slot_name})", 500
+        return f"Failed to deliver message to {clean_to} ({slot_name})", 500
 
 # ------------------------------------------------------------------------------
 # CONNECTOR 2: MODERN JSON REST API
+# Strict authentication (Slot API Key or Master Key) and sanitized inputs
 # ------------------------------------------------------------------------------
 @app.route('/api/v1/sms/send', methods=['POST'])
 @app.route('/send-sms', methods=['POST'])
@@ -888,7 +1021,7 @@ def send_message_rest():
     type_ = data.get('type', 'individual')
 
     auth_header = request.headers.get('Authorization')
-    api_key_header = request.headers.get('X-API-Key')
+    api_key_header = request.headers.get('X-API-Key') or request.headers.get('X-Master-Key')
     provided_key = api_key_header
     if not provided_key and auth_header and auth_header.startswith('Bearer '):
         provided_key = auth_header.split(' ')[1]
@@ -905,13 +1038,26 @@ def send_message_rest():
     if matched_slot_by_key:
         preferred_gw = str(matched_slot_by_key.id)
     else:
-        # Fallback to Global API Key
-        expected_api_key = os.environ.get('GATEWAY_API_KEY')
-        if expected_api_key and provided_key != expected_api_key:
-            return jsonify({"success": False, "error": "Unauthorized: Invalid or missing API Key"}), 401
+        # Check Master Key or Admin Session
+        master_key = os.environ.get('GATEWAY_MASTER_KEY')
+        is_valid_master = bool(master_key and provided_key == master_key)
+        is_session_admin = bool(session.get('logged_in'))
+        if not is_valid_master and not is_session_admin:
+            return jsonify({"success": False, "error": "Unauthorized: Valid slot API key or Master Key required"}), 401
 
     if not target or not message:
         return jsonify({"success": False, "error": "Missing target phone number or message content"}), 400
+
+    # Sanitize and validate inputs
+    if type_ != 'group':
+        target_clean = re.sub(r'[\s\-\(\)]', '', str(target))
+        if not re.match(r'^\+?[0-9]{7,15}$', target_clean):
+            return jsonify({"success": False, "error": "Invalid phone number format. Must be 7-15 digits with optional '+' prefix."}), 400
+        target = target_clean
+
+    clean_message = str(message).replace('\x00', '').replace('\x1a', '').replace('\x1b', '').strip()
+    if not clean_message:
+        return jsonify({"success": False, "error": "Message body cannot be empty"}), 400
 
     if type_ == 'group':
         conn = get_db_connection()
@@ -926,7 +1072,8 @@ def send_message_rest():
 
             success_count = 0
             for row in rows:
-                ok, _ = gateway_manager.send_sms(row[0], message, preferred_gateway=preferred_gw, connector_source="Broadcast")
+                row_clean = re.sub(r'[\s\-\(\)]', '', str(row[0]))
+                ok, _ = gateway_manager.send_sms(row_clean, clean_message, preferred_gateway=preferred_gw, connector_source="Broadcast")
                 if ok:
                     success_count += 1
 
@@ -934,7 +1081,7 @@ def send_message_rest():
         else:
             return jsonify({"success": False, "error": "Database error"}), 500
     else:
-        success, slot_name = gateway_manager.send_sms(target, message, preferred_gateway=preferred_gw, connector_source="REST")
+        success, slot_name = gateway_manager.send_sms(target, clean_message, preferred_gateway=preferred_gw, connector_source="REST")
         if success:
             return jsonify({"success": True, "dispatched_via": slot_name})
         else:
@@ -947,10 +1094,14 @@ def send_message_rest():
 def manage_gateways_api():
     if request.method == 'GET':
         gateway_manager.load_slots_from_db()
-        slot_list = [s.to_dict() for s in gateway_manager.slots.values()]
+        is_admin = is_admin_authenticated()
+        slot_list = [s.to_dict(include_sensitive=is_admin) for s in gateway_manager.slots.values()]
         return jsonify(slot_list)
 
-    # ADD A NEW MODEM SLOT
+    # ADD A NEW MODEM SLOT - Admin authentication required
+    if not is_admin_authenticated():
+        return jsonify({"success": False, "error": "Unauthorized: Admin authentication or Master Key required"}), 401
+
     data = request.get_json() or {}
     name = data.get('name')
     port = data.get('port')
@@ -981,6 +1132,8 @@ def manage_gateways_api():
 @app.route('/api/v1/gateways/<int:gw_id>', methods=['GET', 'PUT', 'POST', 'DELETE'])
 def manage_single_gateway_api(gw_id):
     if request.method == 'DELETE':
+        if not is_admin_authenticated():
+            return jsonify({"success": False, "error": "Unauthorized: Admin authentication or Master Key required"}), 401
         conn = get_db_connection()
         if conn:
             with conn.cursor() as cur:
@@ -995,9 +1148,13 @@ def manage_single_gateway_api(gw_id):
         return jsonify({"success": False, "error": "Gateway slot not found"}), 404
 
     if request.method == 'GET':
-        return jsonify({"success": True, "slot": slot.to_dict()})
+        is_admin = is_admin_authenticated()
+        return jsonify({"success": True, "slot": slot.to_dict(include_sensitive=is_admin)})
 
-    # PUT or POST: Update configuration settings
+    # PUT or POST: Update configuration settings - Admin authentication required
+    if not is_admin_authenticated():
+        return jsonify({"success": False, "error": "Unauthorized: Admin authentication or Master Key required"}), 401
+
     data = request.get_json(silent=True) or {}
     name = data.get('name', slot.name).strip()
     port = data.get('port', slot.port_name).strip()
@@ -1039,11 +1196,13 @@ def manage_single_gateway_api(gw_id):
             slot.baudrate = baudrate
             slot.open_port()
 
-        return jsonify({"success": True, "message": "Configuration saved successfully", "slot": slot.to_dict()})
+        is_admin = is_admin_authenticated()
+        return jsonify({"success": True, "message": "Configuration saved successfully", "slot": slot.to_dict(include_sensitive=is_admin)})
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
 
 @app.route('/api/v1/gateways/<int:gw_id>/logs', methods=['GET'])
+@admin_required
 def get_gateway_slot_logs_api(gw_id):
     slot = gateway_manager.slots.get(gw_id)
     if not slot:
@@ -1122,6 +1281,7 @@ def get_gateway_slot_logs_api(gw_id):
         conn.close()
 
 @app.route('/api/v1/gateways/<int:gw_id>/at-command', methods=['POST'])
+@admin_required
 def gateway_at_command_api(gw_id):
     slot = gateway_manager.slots.get(gw_id)
     if not slot:
@@ -1130,6 +1290,10 @@ def gateway_at_command_api(gw_id):
     cmd = data.get('command', '').strip()
     if not cmd:
         return jsonify({"success": False, "error": "Command is required"}), 400
+
+    # Prevent AT command injection and binary control characters
+    if any(c in cmd for c in ['\r', '\n', '\x00', '\x1a', '\x1b']):
+        return jsonify({"success": False, "error": "Invalid characters in AT command"}), 400
 
     if (not slot.ser or not slot.ser.is_open) and not slot.is_mock:
         slot.open_port()
@@ -1158,6 +1322,22 @@ def gateway_check_inbox_api(gw_id):
     slot = gateway_manager.slots.get(gw_id)
     if not slot:
         return jsonify({"success": False, "error": "Gateway not found"}), 404
+
+    # Verify authorization (Slot API key or Admin/Master Key)
+    provided_key = request.headers.get('X-API-Key') or request.headers.get('X-Master-Key')
+    auth_header = request.headers.get('Authorization')
+    if not provided_key and auth_header and auth_header.startswith('Bearer '):
+        provided_key = auth_header.split(' ')[1]
+
+    master_key = os.environ.get('GATEWAY_MASTER_KEY')
+    is_authorized = bool(
+        session.get('logged_in') or 
+        (provided_key and provided_key == slot.api_key) or 
+        (master_key and provided_key == master_key)
+    )
+    if not is_authorized:
+        return jsonify({"success": False, "error": "Unauthorized: Slot API key or Admin access required"}), 401
+
     msgs = slot.check_incoming_sms()
     return jsonify({"success": True, "new_messages_count": len(msgs), "messages": msgs})
 
@@ -1168,14 +1348,22 @@ def gateway_occupy_api(gw_id):
         return jsonify({"success": False, "error": "Gateway not found"}), 404
         
     data = request.get_json(silent=True) or {}
-    system_name = data.get('system_name')
-    provided_key = data.get('api_key') or request.headers.get('X-API-Key')
+    system_name = (data.get('system_name') or '').strip()
+    master_key = os.environ.get('GATEWAY_MASTER_KEY')
+
+    auth_header = request.headers.get('Authorization')
+    bearer_token = auth_header.split(' ')[1] if auth_header and auth_header.startswith('Bearer ') else None
+    provided_key = data.get('api_key') or request.headers.get('X-API-Key') or request.headers.get('X-Master-Key') or bearer_token
     
     if not system_name:
         return jsonify({"success": False, "error": "Missing system_name"}), 400
-        
-    if not provided_key or provided_key != slot.api_key:
-        return jsonify({"success": False, "error": "Unauthorized: Invalid slot API key"}), 401
+
+    is_authorized = bool(
+        (provided_key and (provided_key == slot.api_key or (master_key and provided_key == master_key))) or
+        session.get('logged_in')
+    )
+    if not is_authorized:
+        return jsonify({"success": False, "error": "Unauthorized: Valid slot API key or Master Key required"}), 401
         
     if slot.occupied_by and slot.occupied_by != system_name:
         return jsonify({"success": False, "error": f"Slot already occupied by {slot.occupied_by}"}), 409
@@ -1190,9 +1378,15 @@ def gateway_occupy_api(gw_id):
     except Exception as e:
         print("Error updating occupancy:", e)
         
-    return jsonify({"success": True, "message": f"Slot successfully occupied by {system_name}"})
+    return jsonify({
+        "success": True, 
+        "message": f"Slot successfully occupied by {system_name}",
+        "slot_id": gw_id,
+        "api_key": slot.api_key
+    })
 
 @app.route('/api/v1/gateways/<int:gw_id>/toggle', methods=['POST'])
+@admin_required
 def toggle_gateway_api(gw_id):
     conn = get_db_connection()
     if conn:
@@ -1204,6 +1398,7 @@ def toggle_gateway_api(gw_id):
     return jsonify({"success": False, "error": "Database error"}), 500
 
 @app.route('/api/v1/gateways/<int:gw_id>/sim', methods=['GET', 'POST'])
+@admin_required
 def manage_gateway_sim_api(gw_id):
     slot = gateway_manager.slots.get(gw_id)
     if not slot:
@@ -1221,6 +1416,7 @@ def manage_gateway_sim_api(gw_id):
     return jsonify({"success": True, "slot_id": gw_id, "sim_number": sim_number})
 
 @app.route('/api/v1/gateways/sim-scan', methods=['POST'])
+@admin_required
 def scan_all_sims_api():
     results = {}
     for slot_id, slot in gateway_manager.slots.items():
@@ -1229,6 +1425,7 @@ def scan_all_sims_api():
     return jsonify({"success": True, "sim_cards": results})
 
 @app.route('/api/v1/system/ports', methods=['GET'])
+@admin_required
 def scan_system_ports_api():
     """Scans physical hardware on the machine (e.g. COM19, COM20, COM21, COM22)"""
     try:
@@ -1238,6 +1435,7 @@ def scan_system_ports_api():
         return jsonify({"ports": [], "error": str(e)})
 
 @app.route('/api/v1/system/auto-detect', methods=['POST'])
+@admin_required
 def auto_detect_hardware_slots():
     """Scans all system COM ports, probes each for a GSM modem, and creates/updates slots"""
     try:
@@ -1319,6 +1517,7 @@ def auto_detect_hardware_slots():
 
 
 @app.route('/api/v1/connectors', methods=['GET'])
+@admin_required
 def get_connectors_api():
     conn = get_db_connection()
     if not conn: return jsonify([])
@@ -1342,6 +1541,7 @@ def get_connectors_api():
         conn.close()
 
 @app.route('/api/v1/outbox', methods=['GET'])
+@admin_required
 def get_outbox_api():
     conn = get_db_connection()
     if not conn: return jsonify([])
@@ -1368,8 +1568,9 @@ def get_outbox_api():
     finally:
         conn.close()
 
-# Legacy Messenger APIs
+# Legacy Messenger APIs (Session Admin Protected)
 @app.route('/api/init_data', methods=['GET'])
+@admin_required
 def get_init_data():
     raw_contacts = get_all_contacts()
     contacts = []
@@ -1389,6 +1590,7 @@ def get_init_data():
     })
 
 @app.route('/api/messages', methods=['GET'])
+@admin_required
 def get_messages():
     target = request.args.get('target')
     type_ = request.args.get('type')
@@ -1419,6 +1621,7 @@ def get_messages():
     return jsonify(messages)
 
 @app.route('/api/contacts', methods=['GET', 'POST'])
+@admin_required
 def contacts_route():
     if request.method == 'GET':
         raw_contacts = get_all_contacts()
@@ -1433,10 +1636,14 @@ def contacts_route():
         return jsonify(contacts)
 
     data = request.get_json() or {}
-    name = data.get('name')
-    phone = data.get('phone_number') or data.get('phone')
-    dept = data.get('department')
+    name = (data.get('name') or '').strip()[:100]
+    raw_phone = data.get('phone_number') or data.get('phone') or ''
+    phone = re.sub(r'[\s\-\(\)]', '', str(raw_phone))
+    dept = (data.get('department') or '').strip()[:100]
     
+    if not name or not phone:
+        return jsonify({"success": False, "error": "Name and phone number are required"}), 400
+
     conn = get_db_connection()
     if conn:
         try:
@@ -1451,6 +1658,7 @@ def contacts_route():
     return jsonify({"success": False, "error": "DB Error"}), 500
 
 @app.route('/api/logs', methods=['GET'])
+@admin_required
 def get_all_logs():
     conn = get_db_connection()
     if not conn: return jsonify([])
