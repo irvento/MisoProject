@@ -294,17 +294,27 @@ class ModemSlot:
         with self.lock:
             try:
                 self.ser = serial.Serial(self.port_name, baudrate=self.baudrate, timeout=2, write_timeout=2)
+                
+                # Verify that an actual GSM modem is replying with OK to AT
+                at_resp = self._send_at("AT", delay=0.3)
+                if not at_resp or "OK" not in at_resp:
+                    raise RuntimeError(f"Port {self.port_name} opened but device did not answer AT handshake (got: {repr(at_resp)})")
+
                 self.is_mock = False
                 self.status = "ONLINE"
                 self.last_error = None
                 print(f"✅ [MODEM SLOT] {self.name} connected on {self.port_name} ({self.baudrate} baud)")
-                self._send_at("AT")
                 self._send_at("ATE0")
                 self._send_at("AT+CMEE=1")
                 self._send_at("AT+CMGF=1") # Text mode
                 self.update_signal()
                 self.read_sim_card_details(force_open=False)
             except Exception as e:
+                if self.ser:
+                    try:
+                        self.ser.close()
+                    except Exception:
+                        pass
                 self.is_mock = True
                 self.status = "MOCK"
                 self.ser = None
